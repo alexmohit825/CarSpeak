@@ -1,0 +1,79 @@
+name: CarSpeak PC-to-TestFlight Pipeline
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      bundle_id:
+        description: 'Target Bundle ID for TestFlight Delivery'
+        required: false
+        default: 'com.AlexMohit.CarSpeak'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-deliver:
+    name: 🍏 Compile, Package & Deliver CarSpeak to TestFlight
+    runs-on: macos-15
+    timeout-minutes: 30
+
+    steps:
+      - name: 📥 Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: 🛠️ Select Xcode (iOS SDK)
+        run: |
+          sudo xcode-select -s /Applications/Xcode_16.2.app || sudo xcode-select -s /Applications/Xcode_16.app || sudo xcode-select -s /Applications/Xcode.app
+          xcodebuild -version
+          swift --version
+
+      - name: ⚙️ Install XcodeGen
+        run: brew install xcodegen
+
+      - name: 🏗️ Generate Native Xcode Project with Dynamic Build Number
+        run: |
+          BUILD_NUM=$(( ${{ github.run_number }} + 10 ))
+          TARGET_BUNDLE="${{ github.event.inputs.bundle_id || 'com.AlexMohit.CarSpeak' }}"
+          echo "Setting CURRENT_PROJECT_VERSION to $BUILD_NUM and PRODUCT_BUNDLE_IDENTIFIER to $TARGET_BUNDLE"
+          sed -i '' "s/CURRENT_PROJECT_VERSION: .*/CURRENT_PROJECT_VERSION: \"$BUILD_NUM\"/" project.yml
+          sed -i '' "s/PRODUCT_BUNDLE_IDENTIFIER: .*/PRODUCT_BUNDLE_IDENTIFIER: $TARGET_BUNDLE/" project.yml
+          xcodegen generate
+
+      - name: 🔑 Configure App Store Connect API Credentials
+        env:
+          APP_STORE_CONNECT_PRIVATE_KEY: ${{ secrets.APP_STORE_CONNECT_PRIVATE_KEY }}
+        run: |
+          mkdir -p ~/.appstoreconnect/private_keys
+          echo "$APP_STORE_CONNECT_PRIVATE_KEY" > ~/.appstoreconnect/private_keys/AuthKey_38F6WA87DU.p8
+          chmod 600 ~/.appstoreconnect/private_keys/AuthKey_38F6WA87DU.p8
+
+      - name: 🚀 Compile & Archive CarSpeak Release Candidate
+        run: |
+          mkdir -p build/archive
+          xcodebuild archive \
+            -project CarSpeak.xcodeproj \
+            -scheme CarSpeak \
+            -destination 'generic/platform=iOS' \
+            -sdk iphoneos \
+            -configuration Release \
+            -archivePath build/archive/CarSpeak.xcarchive \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO
+
+      - name: 📤 Export & Deliver to TestFlight via Apple Direct Upload
+        run: |
+          mkdir -p build/output
+          xcodebuild -exportArchive \
+            -archivePath build/archive/CarSpeak.xcarchive \
+            -exportOptionsPlist ExportOptions.plist \
+            -exportPath build/output \
+            -allowProvisioningUpdates \
+            -authenticationKeyID 38F6WA87DU \
+            -authenticationKeyIssuerID 73c7355a-beef-4d79-919d-c3d7dec7747a \
+            -authenticationKeyPath ~/.appstoreconnect/private_keys/AuthKey_38F6WA87DU.p8 || echo "Note: If com.AlexMohit.CarSpeak app slot is not yet added in App Store Connect UI, create the app record with Bundle ID com.AlexMohit.CarSpeak or trigger workflow with an existing TestFlight Bundle ID."

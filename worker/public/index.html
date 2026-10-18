@@ -1,0 +1,563 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>CarSpeak — Hands-Free CarPlay & Antigravity Voice Engine</title>
+  <style>
+    :root {
+      --bg: #0a0c10;
+      --panel: #12161f;
+      --panel-hover: #191f2c;
+      --border: #252d3d;
+      --text: #f3f5f8;
+      --muted: #8b95a7;
+      --accent: #38bdf8;
+      --emerald: #10b981;
+      --amber: #f59e0b;
+      --rose: #f43f5e;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Inter", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 14px 24px;
+      background: rgba(18, 22, 31, 0.92);
+      border-bottom: 1px solid var(--border);
+      backdrop-filter: blur(12px);
+      position: sticky;
+      top: 0;
+      z-index: 20;
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .brand-icon {
+      width: 40px;
+      height: 40px;
+      border-radius: 10px;
+      background: #f6f7fa;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.4);
+    }
+    .brand h1 {
+      font-size: 1.25rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+    }
+    .brand span {
+      font-size: 0.78rem;
+      color: var(--muted);
+      display: block;
+    }
+    .telemetry-bar {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 0.75rem;
+      font-weight: 600;
+      padding: 6px 11px;
+      border-radius: 999px;
+      background: var(--panel);
+      border: 1px solid var(--border);
+    }
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--emerald);
+      box-shadow: 0 0 8px var(--emerald);
+    }
+    main {
+      display: grid;
+      grid-template-columns: 340px 1fr 360px;
+      gap: 16px;
+      padding: 16px 24px;
+      flex: 1;
+      max-width: 1680px;
+      width: 100%;
+      margin: 0 auto;
+    }
+    @media (max-width: 1180px) {
+      main { grid-template-columns: 1fr; }
+    }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    .card-header {
+      padding: 14px 18px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .card-header h2 {
+      font-size: 0.95rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--muted);
+    }
+    .card-body {
+      padding: 16px;
+      overflow-y: auto;
+      max-height: calc(100vh - 155px);
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .thread-item, .project-item {
+      padding: 12px 14px;
+      border-radius: 12px;
+      background: rgba(255,255,255,0.02);
+      border: 1px solid var(--border);
+      cursor: pointer;
+      transition: all 0.15s ease;
+    }
+    .thread-item:hover, .project-item:hover {
+      background: var(--panel-hover);
+      border-color: var(--accent);
+    }
+    .thread-item.active {
+      background: rgba(56, 189, 248, 0.12);
+      border-color: var(--accent);
+    }
+    .thread-title {
+      font-size: 0.92rem;
+      font-weight: 600;
+      margin-bottom: 4px;
+    }
+    .thread-meta {
+      font-size: 0.74rem;
+      color: var(--accent);
+      margin-bottom: 6px;
+    }
+    .thread-summary {
+      font-size: 0.8rem;
+      color: var(--muted);
+      line-height: 1.4;
+    }
+    .cockpit-center {
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+    }
+    .orb-stage {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 24px 16px;
+      border-bottom: 1px solid var(--border);
+      background: radial-gradient(circle at center, rgba(56,189,248,0.10) 0%, transparent 70%);
+    }
+    .voice-orb {
+      width: 116px;
+      height: 116px;
+      border-radius: 50%;
+      border: 3px solid var(--accent);
+      background: radial-gradient(circle at 35% 35%, #38bdf8, #0284c7 60%, #0f172a 100%);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      box-shadow: 0 0 32px rgba(56,189,248,0.35);
+      transition: transform 0.2s ease, box-shadow 0.2s ease;
+      margin-bottom: 12px;
+    }
+    .voice-orb.listening {
+      border-color: var(--emerald);
+      background: radial-gradient(circle at 35% 35%, #34d399, #059669 60%, #064e3b 100%);
+      box-shadow: 0 0 45px rgba(16,185,129,0.65);
+      animation: pulseOrb 1.4s infinite ease-in-out;
+    }
+    @keyframes pulseOrb {
+      0%, 100% { transform: scale(1); }
+      50% { transform: scale(1.07); }
+    }
+    .active-banner {
+      text-align: center;
+    }
+    .active-banner h3 {
+      font-size: 1.1rem;
+      font-weight: 700;
+      margin-bottom: 4px;
+    }
+    .active-banner p {
+      font-size: 0.82rem;
+      color: var(--muted);
+    }
+    .persona-strip {
+      display: flex;
+      gap: 8px;
+      margin-top: 12px;
+      flex-wrap: wrap;
+      justify-content: center;
+    }
+    .persona-btn {
+      padding: 6px 12px;
+      font-size: 0.76rem;
+      font-weight: 600;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      background: var(--bg);
+      color: var(--muted);
+      cursor: pointer;
+    }
+    .persona-btn.active {
+      background: var(--accent);
+      color: #06101e;
+      border-color: var(--accent);
+    }
+    .transcript-box {
+      flex: 1;
+      padding: 16px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      max-height: 380px;
+    }
+    .bubble {
+      padding: 12px 15px;
+      border-radius: 14px;
+      max-width: 86%;
+      line-height: 1.45;
+      font-size: 0.92rem;
+    }
+    .bubble.user {
+      align-self: flex-end;
+      background: #1e293b;
+      border: 1px solid #334155;
+    }
+    .bubble.model {
+      align-self: flex-start;
+      background: rgba(56, 189, 248, 0.11);
+      border: 1px solid rgba(56, 189, 248, 0.3);
+    }
+    .composer {
+      display: flex;
+      gap: 8px;
+      padding: 14px 16px;
+      border-top: 1px solid var(--border);
+      background: rgba(10, 12, 16, 0.6);
+    }
+    .composer input, .search-input {
+      flex: 1;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 10px 14px;
+      border-radius: 10px;
+      font-size: 0.9rem;
+    }
+    .btn {
+      background: var(--accent);
+      color: #04101c;
+      border: none;
+      font-weight: 700;
+      padding: 10px 16px;
+      border-radius: 10px;
+      cursor: pointer;
+      font-size: 0.85rem;
+    }
+    .quick-voice-cmds {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+      padding: 8px 16px;
+      border-top: 1px solid var(--border);
+    }
+    .chip {
+      font-size: 0.73rem;
+      padding: 5px 10px;
+      border-radius: 8px;
+      background: rgba(255,255,255,0.04);
+      border: 1px solid var(--border);
+      color: var(--muted);
+      cursor: pointer;
+    }
+    .chip:hover { color: var(--text); border-color: var(--accent); }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <div class="brand-icon" title="CarSpeak Light-Background Speaking Profile Icon">
+        <svg width="28" height="28" viewBox="0 0 100 100" fill="none">
+          <path d="M22 84 C26 74, 26 65, 23 58 C16 48, 15 34, 22 24 C29 14, 44 12, 54 18 C59 22, 61 29, 59 35 L65 46 C66 49, 62 51, 59 52 L61 55 C56 57, 56 61, 61 63 C59 68, 61 72, 56 74 L46 74 L47 84 Z" fill="#111318"/>
+          <line x1="69" y1="58" x2="78" y2="58" stroke="#111318" stroke-width="4" stroke-linecap="round"/>
+          <line x1="68" y1="52" x2="76" y2="47" stroke="#111318" stroke-width="4" stroke-linecap="round"/>
+          <line x1="68" y1="64" x2="76" y2="69" stroke="#111318" stroke-width="4" stroke-linecap="round"/>
+          <path d="M80 42 A22 22 0 0 1 80 74" stroke="#111318" stroke-width="4" stroke-linecap="round" fill="none"/>
+          <path d="M87 36 A30 30 0 0 1 87 80" stroke="#111318" stroke-width="4" stroke-linecap="round" fill="none"/>
+        </svg>
+      </div>
+      <div>
+        <h1>CarSpeak</h1>
+        <span>5G-Resilient CarPlay Conversational AI &bull; Antigravity Portfolio Engine</span>
+      </div>
+    </div>
+    <div class="telemetry-bar">
+      <div class="badge"><span class="dot"></span> <span id="modelBadge">Gemini 3.8 Live Ready</span></div>
+      <div class="badge">5G Outbox RingBuffer: 5.0s PCM16</div>
+      <div class="badge" id="projectCountBadge">56 AG Projects Synced</div>
+    </div>
+  </header>
+
+  <main>
+    <!-- Column 1: Archived Conversations Vault -->
+    <section class="card">
+      <div class="card-header">
+        <h2>Archived Conversations</h2>
+        <button class="btn" style="padding:5px 10px;font-size:0.75rem;" onclick="promptNewThread()">+ New</button>
+      </div>
+      <div class="card-body" id="conversationsList"></div>
+    </section>
+
+    <!-- Column 2: Hands-Free Cockpit & Voice Thread Switcher -->
+    <section class="card cockpit-center">
+      <div class="orb-stage">
+        <div class="voice-orb" id="voiceOrb" onclick="toggleHandsFreeVoice()" title="Tap or say 'Hey Siri, start CarSpeak'">
+          <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round">
+            <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/>
+            <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+            <line x1="12" y1="19" x2="12" y2="22"/>
+          </svg>
+        </div>
+        <div class="active-banner">
+          <h3 id="activeThreadTitle">Loading Active Commute Thread...</h3>
+          <p id="activeThreadSubtitle">Tap Orb for Hands-Free Cabin Voice or issue a voice command below</p>
+        </div>
+        <div class="persona-strip" id="personaStrip">
+          <button class="persona-btn active" onclick="setPersona('executive', this)">Executive Chief of Staff</button>
+          <button class="persona-btn" onclick="setPersona('surgical', this)">Surgical &amp; Clinical</button>
+          <button class="persona-btn" onclick="setPersona('architect', this)">Systems Architect</button>
+          <button class="persona-btn" onclick="setPersona('memo', this)">Roadmap Capture</button>
+        </div>
+      </div>
+
+      <div class="transcript-box" id="transcriptBox"></div>
+
+      <div class="quick-voice-cmds">
+        <span class="chip" onclick="sendVoiceCommand('Switch to our previous conversation on DuralGuard')">"Switch to DuralGuard conversation"</span>
+        <span class="chip" onclick="sendVoiceCommand('Switch to our Radix and PJKPredict conversation')">"Switch to Radix &amp; PJKPredict"</span>
+        <span class="chip" onclick="sendVoiceCommand('Pull up the Antigravity dossier on Spine-Measure and CPTArmor')">"Inspect Spine-Measure &amp; CPTArmor"</span>
+        <span class="chip" onclick="sendVoiceCommand('List all my archived conversations')">"List archived conversations"</span>
+      </div>
+
+      <form class="composer" onsubmit="handleSubmit(event)">
+        <input type="text" id="promptInput" placeholder="Speak or type a command (e.g. 'Switch to MDEsq thread' or 'Where did we leave off on VigilOR?')..." />
+        <button type="submit" class="btn">Send</button>
+      </form>
+    </section>
+
+    <!-- Column 3: Antigravity (AG) Project Portfolio Memory -->
+    <section class="card">
+      <div class="card-header">
+        <h2>Antigravity Portfolio (56)</h2>
+      </div>
+      <div style="padding: 10px 16px; border-bottom: 1px solid var(--border);">
+        <input type="text" class="search-input" id="projectSearch" placeholder="Filter 56 AG projects (Radix, DuralGuard, MDEsq...)" oninput="renderProjects()" style="width:100%;" />
+      </div>
+      <div class="card-body" id="projectsList"></div>
+    </section>
+  </main>
+
+  <script>
+    let state = {
+      conversations: [],
+      activeConversationId: null,
+      projects: [],
+      persona: 'executive',
+      listening: false,
+      recognition: null
+    };
+
+    async function loadInitialData() {
+      const [convRes, projRes] = await Promise.all([
+        fetch('/api/conversations').then(r => r.json()),
+        fetch('/api/projects').then(r => r.json())
+      ]);
+      state.conversations = convRes.conversations || [];
+      state.activeConversationId = convRes.activeConversationId || (state.conversations[0] && state.conversations[0].id);
+      state.projects = projRes.projects || [];
+      document.getElementById('projectCountBadge').textContent = `${state.projects.length} AG Projects Synced`;
+      renderConversations();
+      renderActiveTranscript();
+      renderProjects();
+    }
+
+    function renderConversations() {
+      const container = document.getElementById('conversationsList');
+      container.innerHTML = state.conversations.map(c => `
+        <div class="thread-item ${c.id === state.activeConversationId ? 'active' : ''}" onclick="switchThread('${c.id}')">
+          <div class="thread-title">${c.title}</div>
+          <div class="thread-meta">${c.projectName || 'General'} &bull; ${(c.turns || []).length} turns</div>
+          <div class="thread-summary">${c.summary || 'No summary yet.'}</div>
+        </div>
+      `).join('');
+    }
+
+    function renderActiveTranscript() {
+      const active = state.conversations.find(c => c.id === state.activeConversationId) || state.conversations[0];
+      const box = document.getElementById('transcriptBox');
+      if (!active) {
+        box.innerHTML = '';
+        return;
+      }
+      document.getElementById('activeThreadTitle').textContent = active.title;
+      document.getElementById('activeThreadSubtitle').textContent = `Linked AG Project: ${active.projectName || 'General'} • Voice Archive Active`;
+      box.innerHTML = (active.turns || []).map(t => `
+        <div class="bubble ${t.role}">
+          <strong>${t.role === 'user' ? 'Dr. Mohit' : 'CarSpeak'}:</strong> ${t.text}
+        </div>
+      `).join('');
+      box.scrollTop = box.scrollHeight;
+    }
+
+    function renderProjects() {
+      const q = (document.getElementById('projectSearch').value || '').toLowerCase().trim();
+      const filtered = q
+        ? state.projects.filter(p =>
+            p.displayName.toLowerCase().includes(q) ||
+            p.category.toLowerCase().includes(q) ||
+            p.summary.toLowerCase().includes(q)
+          )
+        : state.projects;
+      const container = document.getElementById('projectsList');
+      container.innerHTML = filtered.map(p => `
+        <div class="project-item" onclick="sendVoiceCommand('Pull up our Antigravity project ${p.displayName} and tell me where we left off')">
+          <div class="thread-title">${p.displayName}</div>
+          <div class="thread-meta">${p.category} &bull; ${p.lastModified}</div>
+          <div class="thread-summary">${p.summary}</div>
+          ${(p.roadmapNotes && p.roadmapNotes.length) ? `<div style="margin-top:6px;font-size:0.75rem;color:#10b981;">Saved Note: ${p.roadmapNotes[0].note}</div>` : ''}
+        </div>
+      `).join('');
+    }
+
+    async function switchThread(id) {
+      const res = await fetch('/api/conversations', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'switch', conversationId: id })
+      }).then(r => r.json());
+      if (res.switchedConversation) {
+        state.activeConversationId = res.switchedConversation.id;
+        renderConversations();
+        renderActiveTranscript();
+      }
+    }
+
+    async function promptNewThread() {
+      const title = prompt('Enter new conversation topic or Antigravity project name:');
+      if (!title) return;
+      await sendVoiceCommand(`Start a new conversation titled ${title}`);
+    }
+
+    function setPersona(p, btn) {
+      state.persona = p;
+      document.querySelectorAll('.persona-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+    }
+
+    async function sendVoiceCommand(text) {
+      const input = document.getElementById('promptInput');
+      input.value = text;
+      await submitMessage(text);
+    }
+
+    async function handleSubmit(e) {
+      e.preventDefault();
+      const input = document.getElementById('promptInput');
+      const text = input.value.trim();
+      if (!text) return;
+      input.value = '';
+      await submitMessage(text);
+    }
+
+    async function submitMessage(text) {
+      const box = document.getElementById('transcriptBox');
+      box.innerHTML += `<div class="bubble user"><strong>Dr. Mohit:</strong> ${text}</div>`;
+      box.scrollTop = box.scrollHeight;
+
+      const res = await fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          message: text,
+          persona: state.persona,
+          conversationId: state.activeConversationId
+        })
+      }).then(r => r.json());
+
+      await loadInitialData();
+
+      if (res.reply && window.speechSynthesis) {
+        window.speechSynthesis.cancel();
+        const utter = new SpeechSynthesisUtterance(res.reply);
+        utter.rate = 1.04;
+        window.speechSynthesis.speak(utter);
+      }
+    }
+
+    function toggleHandsFreeVoice() {
+      const orb = document.getElementById('voiceOrb');
+      const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
+      if (!SpeechRec) {
+        alert('Use the native CarSpeak iOS app on CarPlay or Chrome/Safari with SpeechRecognition enabled.');
+        return;
+      }
+      if (state.listening && state.recognition) {
+        state.listening = false;
+        state.recognition.stop();
+        orb.classList.remove('listening');
+        return;
+      }
+      const rec = new SpeechRec();
+      rec.continuous = false;
+      rec.interimResults = false;
+      rec.lang = 'en-US';
+      rec.onstart = () => {
+        state.listening = true;
+        orb.classList.add('listening');
+      };
+      rec.onresult = (ev) => {
+        const transcript = ev.results[0][0].transcript;
+        submitMessage(transcript);
+      };
+      rec.onend = () => {
+        state.listening = false;
+        orb.classList.remove('listening');
+      };
+      state.recognition = rec;
+      rec.start();
+    }
+
+    loadInitialData();
+  </script>
+</body>
+</html>

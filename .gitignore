@@ -1,0 +1,9 @@
+build/
+DerivedData/
+*.xcodeproj/project.xcworkspace/
+*.xcodeproj/xcuserdata/
+.DS_Store
+node_modules/
+.wrangler/
+.env
+.dev.vars
