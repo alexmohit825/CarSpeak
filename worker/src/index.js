@@ -342,7 +342,7 @@ export default {
             app: 'CarSpeak',
             bundleId: 'com.AlexMohit.CarSpeak',
             liveModel: 'gemini-3.8-live',
-            fallbackModel: 'gemini-2.5-flash',
+            fallbackModel: 'gemini-3.8-flash',
             hasApiKey: Boolean(env.GEMINI_API_KEY),
             agProjectCount: projects.length,
             archivedConversationCount: conversations.length,
@@ -618,7 +618,7 @@ export default {
               : userMessage;
             contents.push({ role: 'user', parts: [{ text: contextPrefix }] });
 
-            const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
+            const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${apiKey}`;
             const geminiResp = await fetch(geminiUrl, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
