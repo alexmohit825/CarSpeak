@@ -38,4 +38,5 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.AlexMohit.CarSpeak
         PRODUCT_NAME: CarSpeak
         INFOPLIST_FILE: CarSpeak/Info.plist
+        CODE_SIGN_ENTITLEMENTS: CarSpeak/CarSpeak.entitlements
         TARGETED_DEVICE_FAMILY: "1,2"
