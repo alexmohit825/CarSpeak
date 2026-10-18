@@ -12,8 +12,8 @@ final class ConversationVaultClient: ObservableObject {
     @Published var agProjects: [AGProjectDossier] = []
     @Published var isSyncing: Bool = false
 
-    private let localConversationsKey = "carspeak_archived_conversations_v1"
-    private let localActiveIdKey = "carspeak_active_conversation_id_v1"
+    private let localConversationsKey = "carspeak_archived_conversations_v2_clean"
+    private let localActiveIdKey = "carspeak_active_conversation_id_v2_clean"
 
     init() {
         loadBundledAGPortfolioSeed()

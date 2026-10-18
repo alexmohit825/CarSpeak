@@ -6,96 +6,7 @@ const CORS_HEADERS = {
   'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-CarSpeak-Client',
 };
 
-const SEEDED_CONVERSATIONS = [
-  {
-    id: 'conv-radix-pjk-2026',
-    title: 'Radix & PJKPredict Spine Biomechanics Review',
-    projectId: 'radix',
-        projectName: 'Radix (RadixNeuro) / PJKPredict',
-    persona: 'surgical',
-    createdAt: '2026-10-17T16:30:00Z',
-    updatedAt: '2026-10-18T08:15:00Z',
-    summary: 'Reviewed C5-T1 radiculopathy dermatome-myotome localization in Radix and proximal junctional kyphosis (PJK) UIV selection thresholds in PJKPredict.',
-    turns: [
-      {
-        role: 'user',
-        text: 'Let us review where we left off on Radix and PJKPredict spinopelvic alignment thresholds.',
-        timestamp: '2026-10-18T08:12:00Z'
-      },
-      {
-        role: 'model',
-        text: 'In Radix, we finalized the cervical and lumbosacral radiculopathy localization matrix correlating disc herniation zones with motor/reflex deficits. In PJKPredict, we anchored the preoperative sagittal alignment risk calculator around PI-LL mismatch, SVA, and UIV selection at the thoracolumbar junction. Ready to pick up on prophylactic tether scoring or Radix TestFlight refinements whenever you are.',
-        timestamp: '2026-10-18T08:12:18Z'
-      }
-    ]
-  },
-  {
-    id: 'conv-duralguard-vigilor-2026',
-    title: 'DuralGuard & VigilOR Intraoperative Safety Suite',
-    projectId: 'duralguard',
-    projectName: 'DuralGuard & VigilOR Sentinel',
-    persona: 'surgical',
-    createdAt: '2026-10-15T17:10:00Z',
-    updatedAt: '2026-10-17T18:45:00Z',
-    summary: 'Discussed watertight dural closure risk stratification in DuralGuard and hands-free intraoperative IONM / blood-loss timer milestones in VigilOR.',
-    turns: [
-      {
-        role: 'user',
-        text: 'Summarize our current architecture on DuralGuard and VigilOR Sentinel.',
-        timestamp: '2026-10-17T18:40:00Z'
-      },
-      {
-        role: 'model',
-        text: 'DuralGuard stratifies postoperative CSF leak and pseudomeningocele risk based on durotomy location, repair technique, and graft selection. VigilOR Sentinel tracks intraoperative neuromonitoring alerts, EBL intervals, and surgical milestones. Next on the roadmap is cross-linking intraoperative dural tear events in VigilOR directly into DuralGuard closure protocols.',
-        timestamp: '2026-10-17T18:41:00Z'
-      }
-    ]
-  },
-  {
-    id: 'conv-mdesq-cptarmor-2026',
-    title: 'MDEsq & CPTArmor Medicolegal & Coding Strategy',
-    projectId: 'mdesq',
-    projectName: 'MDEsq / CPTArmor / JurisShield',
-    persona: 'executive',
-    createdAt: '2026-10-14T15:00:00Z',
-    updatedAt: '2026-10-16T19:20:00Z',
-    summary: 'Aligned CausationMatrix and MDEsq expert witness chronology extraction with CPTArmor operative note NCCI unbundling defense.',
-    turns: [
-      {
-        role: 'user',
-        text: 'How are MDEsq, CausationMatrix, and CPTArmor positioned across our medicolegal and billing portfolio?',
-        timestamp: '2026-10-16T19:18:00Z'
-      },
-      {
-        role: 'model',
-        text: 'MDEsq and CausationMatrix handle forensic chronology synthesis, proximate cause biomechanics, and standard-of-care analysis for IMEs and malpractice defense, while CPTArmor and PreAuthIQ protect neurosurgical operative documentation against payer NCCI bundling and prior-authorization denials.',
-        timestamp: '2026-10-16T19:19:00Z'
-      }
-    ]
-  },
-  {
-    id: 'conv-futurus-learnlab-2026',
-    title: 'Futurus AI Wealth & LearnLab Quant Engine',
-    projectId: 'futurus',
-    projectName: 'Futurus AI / LearnLab / ETF-Rebalancer',
-    persona: 'executive',
-    createdAt: '2026-10-13T14:00:00Z',
-    updatedAt: '2026-10-17T20:50:00Z',
-    summary: 'Reviewed Monte Carlo wealth trajectory modeling in Futurus, interactive quant curriculum modules in LearnLab, and OTM cash-secured put screening.',
-    turns: [
-      {
-        role: 'user',
-        text: 'Give me a quick status check on Futurus, LearnLab, and our Put Option Screener.',
-        timestamp: '2026-10-17T20:48:00Z'
-      },
-      {
-        role: 'model',
-        text: 'LearnLab is live with interactive financial education modules, Futurus models multi-decade wealth trajectories, and Put Option Screener filters high-yield OTM cash-secured puts with ETF-Rebalancer managing tax-efficient core allocations.',
-        timestamp: '2026-10-17T20:49:00Z'
-      }
-    ]
-  }
-];
+const SEEDED_CONVERSATIONS = [];
 
 const PERSONA_PROMPTS = {
   executive: `You are CarSpeak (Executive Chief of Staff Mode), Dr. A. Alex Mohit's personal, unrestricted, hands-free in-car conversational AI partner running over Apple CarPlay.
@@ -209,23 +120,20 @@ async function getProjects(env) {
 }
 
 async function getConversations(env) {
-  if (!env.CARSPEAK_KV) return SEEDED_CONVERSATIONS;
-  const raw = await env.CARSPEAK_KV.get('conversations_v1');
-  if (!raw) {
-    await env.CARSPEAK_KV.put('conversations_v1', JSON.stringify(SEEDED_CONVERSATIONS));
-    return SEEDED_CONVERSATIONS;
-  }
+  if (!env.CARSPEAK_KV) return [];
+  const raw = await env.CARSPEAK_KV.get('conversations_v2_clean');
+  if (!raw) return [];
   try {
     const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) && parsed.length > 0 ? parsed : SEEDED_CONVERSATIONS;
+    return Array.isArray(parsed) ? parsed : [];
   } catch {
-    return SEEDED_CONVERSATIONS;
+    return [];
   }
 }
 
 async function saveConversations(env, list) {
   if (env.CARSPEAK_KV) {
-    await env.CARSPEAK_KV.put('conversations_v1', JSON.stringify(list));
+    await env.CARSPEAK_KV.put('conversations_v2_clean', JSON.stringify(list));
   }
 }
 
@@ -752,14 +660,30 @@ export default {
         // Persist turn in the active conversation archive
         conversations = await getConversations(env);
         let targetConv = conversations.find(c => c.id === activeId) || conversations[0];
-        if (targetConv) {
-          targetConv.turns = targetConv.turns || [];
-          targetConv.turns.push({ role: 'user', text: userMessage, timestamp: new Date().toISOString() });
-          targetConv.turns.push({ role: 'model', text: replyText, timestamp: new Date().toISOString() });
-          targetConv.summary = replyText.slice(0, 240);
-          targetConv.updatedAt = new Date().toISOString();
-          await saveConversations(env, conversations);
+        if (!targetConv) {
+          const primaryProj = referencedProjects[0] || (body.projectId ? findMatchingProject(projects, body.projectId) : null);
+          targetConv = {
+            id: 'conv-' + Date.now(),
+            title: primaryProj ? `${primaryProj.displayName} Session` : userMessage.slice(0, 48),
+            projectId: primaryProj ? primaryProj.id : '',
+            projectName: primaryProj ? primaryProj.displayName : 'General',
+            persona,
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+            summary: '',
+            turns: []
+          };
+          conversations.unshift(targetConv);
+          if (env.CARSPEAK_KV) {
+            await env.CARSPEAK_KV.put('active_conversation_id', targetConv.id);
+          }
         }
+        targetConv.turns = targetConv.turns || [];
+        targetConv.turns.push({ role: 'user', text: userMessage, timestamp: new Date().toISOString() });
+        targetConv.turns.push({ role: 'model', text: replyText, timestamp: new Date().toISOString() });
+        targetConv.summary = replyText.slice(0, 240);
+        targetConv.updatedAt = new Date().toISOString();
+        await saveConversations(env, conversations);
 
         return Response.json(
           {
