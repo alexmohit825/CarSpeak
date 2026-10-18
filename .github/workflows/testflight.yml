@@ -29,9 +29,10 @@ jobs:
 
       - name: 🛠️ Select Xcode (iOS SDK)
         run: |
-          sudo xcode-select -s /Applications/Xcode_16.2.app || sudo xcode-select -s /Applications/Xcode_16.app || sudo xcode-select -s /Applications/Xcode.app
+          sudo xcode-select -s /Applications/Xcode_26.3.0.app || sudo xcode-select -s /Applications/Xcode_26.3.app || sudo xcode-select -s /Applications/Xcode_26.app || sudo xcode-select -s /Applications/Xcode.app
           xcodebuild -version
           swift --version
+          xcrun simctl list > /dev/null || true
 
       - name: ⚙️ Install XcodeGen
         run: brew install xcodegen
