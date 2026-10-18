@@ -13,11 +13,10 @@ final class CabinAudioEngine: NSObject, ObservableObject {
 
     private let audioEngine = AVAudioEngine()
     private let playerNode = AVAudioPlayerNode()
+    /// Standard 32-bit Float non-interleaved 24kHz mono format required by iOS AVAudioPlayerNode & AVAudioMixerNode
     private let playbackFormat = AVAudioFormat(
-        commonFormat: .pcmFormatInt16,
-        sampleRate: 24000,
-        channels: 1,
-        interleaved: true
+        standardFormatWithSampleRate: 24000,
+        channels: 1
     )!
 
     private let speechSynthesizer = AVSpeechSynthesizer()
@@ -77,11 +76,17 @@ final class CabinAudioEngine: NSObject, ObservableObject {
 
             guard let converter = converter else { return }
             let ratio = 16000.0 / hwFormat.sampleRate
-            let capacity = AVAudioFrameCount(Double(buffer.frameLength) * ratio) + 32
+            let capacity = AVAudioFrameCount(Double(buffer.frameLength) * ratio) + 16
             guard let pcmBuffer = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: capacity) else { return }
 
             var error: NSError?
+            var didProvideBuffer = false
             let inputBlock: AVAudioConverterInputBlock = { _, outStatus in
+                if didProvideBuffer {
+                    outStatus.pointee = .noDataNow
+                    return nil
+                }
+                didProvideBuffer = true
                 outStatus.pointee = .haveData
                 return buffer
             }
@@ -95,6 +100,7 @@ final class CabinAudioEngine: NSObject, ObservableObject {
         }
 
         do {
+            audioEngine.prepare()
             try audioEngine.start()
             playerNode.play()
             DispatchQueue.main.async {
@@ -122,18 +128,21 @@ final class CabinAudioEngine: NSObject, ObservableObject {
         AcousticEarcons.shared.play(isMuted ? .micMuted : .micUnmuted)
     }
 
-    /// Enqueues 24kHz PCM16 audio chunks from Gemini 3.8 Live into the jitter-buffered player node.
+    /// Converts 24kHz PCM16 little-endian audio chunks from Gemini 3.8 Live into Float32 buffers for iOS AVAudioPlayerNode.
     func enqueueLiveOutputPCM24k(_ data: Data) {
-        guard !data.isEmpty, isCapturing else { return }
-        let frameCount = AVAudioFrameCount(data.count / MemoryLayout<Int16>.size)
+        guard data.count >= 2, isCapturing else { return }
+        let sampleCount = data.count / MemoryLayout<Int16>.size
+        let frameCount = AVAudioFrameCount(sampleCount)
         guard frameCount > 0,
-              let buffer = AVAudioPCMBuffer(pcmFormat: playbackFormat, frameCapacity: frameCount) else { return }
+              let buffer = AVAudioPCMBuffer(pcmFormat: playbackFormat, frameCapacity: frameCount),
+              let floatChannel = buffer.floatChannelData?[0] else { return }
         buffer.frameLength = frameCount
 
         data.withUnsafeBytes { rawBufferPointer in
-            if let baseAddress = rawBufferPointer.baseAddress,
-               let dst = buffer.int16ChannelData?[0] {
-                memcpy(dst, baseAddress, data.count)
+            guard let int16Ptr = rawBufferPointer.bindMemory(to: Int16.self).baseAddress else { return }
+            for i in 0..<sampleCount {
+                let sample = Int16(littleEndian: int16Ptr[i])
+                floatChannel[i] = Float(sample) / 32768.0
             }
         }
 

@@ -27,6 +27,8 @@ final class GeminiLiveSessionManager: NSObject, ObservableObject {
     private var urlSession: URLSession!
     private var resumptionHandle: String?
     private var isHealingHandoff: Bool = false
+    private var isSetupComplete: Bool = false
+    private var queuedContextMessages: [(role: String, text: String, turnComplete: Bool)] = []
     private var pendingUserTranscriptBuffer: String = ""
     private var pendingModelTranscriptBuffer: String = ""
 
@@ -47,7 +49,7 @@ final class GeminiLiveSessionManager: NSObject, ObservableObject {
             DispatchQueue.main.async {
                 self.telemetry.bufferedFramesCount = self.outboxBuffer.pendingCount
             }
-            if !self.isHealingHandoff {
+            if !self.isHealingHandoff && self.isSetupComplete {
                 self.sendRealtimePCMFrame(frame)
             }
         }
@@ -67,6 +69,7 @@ final class GeminiLiveSessionManager: NSObject, ObservableObject {
     func startHandsFreeSession() {
         guard !isLiveSessionActive else { return }
         isLiveSessionActive = true
+        isSetupComplete = false
         connectionStatusText = "Connecting Gemini 3.8 Live (5G Multipath)..."
         telemetry.connectionState = "Connecting"
         audioEngine.startCabinDuplexStream()
@@ -80,6 +83,7 @@ final class GeminiLiveSessionManager: NSObject, ObservableObject {
     func stopHandsFreeSession() {
         isLiveSessionActive = false
         isHealingHandoff = false
+        isSetupComplete = false
         webSocketTask?.cancel(with: .normalClosure, reason: nil)
         webSocketTask = nil
         audioEngine.stopCabinDuplexStream()
@@ -114,6 +118,7 @@ final class GeminiLiveSessionManager: NSObject, ObservableObject {
     func heal5GTowerHandoff() {
         guard isLiveSessionActive, !isHealingHandoff else { return }
         isHealingHandoff = true
+        isSetupComplete = false
         let startTime = Date()
         connectionStatusText = "5G Tower Handoff — Healing Stream..."
         telemetry.connectionState = "5G Handoff Healing"
@@ -130,11 +135,6 @@ final class GeminiLiveSessionManager: NSObject, ObservableObject {
                 self.connectionStatusText = "5G Handoff Seamless (\(elapsedMs) ms)"
                 self.telemetry.connectionState = "5G Multipath Active"
                 AcousticEarcons.shared.play(.handoffHealed)
-            }
-            // Flush any audio frames spoken during the tower switch from the 5-second circular outbox
-            let missedFrames = self.outboxBuffer.drainPendingFrames(maxAgeSeconds: 5.0)
-            for frame in missedFrames {
-                self.sendRealtimePCMFrame(frame)
             }
         }
     }
@@ -174,19 +174,19 @@ final class GeminiLiveSessionManager: NSObject, ObservableObject {
 
             let task = urlSession.webSocketTask(with: wsURL)
             self.webSocketTask = task
+            self.isSetupComplete = false
             task.resume()
 
+            receiveNextWebSocketMessage()
             try await task.send(.string(setupString))
 
             await MainActor.run {
                 self.connectionStatusText = isResuming
                     ? "5G Stream Resumed • \(self.vault.activeConversation?.title ?? "Active")"
-                    : "Listening • \(self.vault.activeConversation?.title ?? "CarSpeak Live")"
+                    : "Listening • \(self.vault.activeConversation?.title ?? "Speak Anytime")"
                 self.telemetry.connectionState = "Gemini 3.8 Live (UDP/Multipath)"
                 SteeringWheelController.shared.updateNowPlayingDashboard()
             }
-
-            receiveNextWebSocketMessage()
         } catch {
             await MainActor.run {
                 self.connectionStatusText = "5G Edge Relay Active"
@@ -196,7 +196,7 @@ final class GeminiLiveSessionManager: NSObject, ObservableObject {
     }
 
     private func sendRealtimePCMFrame(_ frame: OutboxRingBuffer.AudioFrame) {
-        guard let ws = webSocketTask else { return }
+        guard let ws = webSocketTask, isSetupComplete else { return }
         let payload: [String: Any] = [
             "realtimeInput": [
                 "audio": [
@@ -218,7 +218,10 @@ final class GeminiLiveSessionManager: NSObject, ObservableObject {
     }
 
     func injectContextMessageIntoLiveSession(role: String, text: String, turnComplete: Bool = true) {
-        guard let ws = webSocketTask else { return }
+        guard let ws = webSocketTask, isSetupComplete else {
+            queuedContextMessages.append((role: role, text: text, turnComplete: turnComplete))
+            return
+        }
         let payload: [String: Any] = [
             "clientContent": [
                 "turns": [
@@ -266,6 +269,20 @@ final class GeminiLiveSessionManager: NSObject, ObservableObject {
     private func handleServerJSON(_ text: String) {
         guard let data = text.data(using: .utf8),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+
+        // 0. Server Setup Complete — Flush 5-second circular outbox buffer & any queued prompts
+        if json["setupComplete"] != nil {
+            self.isSetupComplete = true
+            let missedFrames = self.outboxBuffer.drainPendingFrames(maxAgeSeconds: 5.0)
+            for frame in missedFrames {
+                self.sendRealtimePCMFrame(frame)
+            }
+            let queued = self.queuedContextMessages
+            self.queuedContextMessages.removeAll()
+            for msg in queued {
+                self.injectContextMessageIntoLiveSession(role: msg.role, text: msg.text, turnComplete: msg.turnComplete)
+            }
+        }
 
         // 1. Update SessionResumptionHandle for zero-loss 5G tower handoffs
         if let resumptionUpdate = json["sessionResumptionUpdate"] as? [String: Any],
@@ -404,10 +421,12 @@ final class GeminiLiveSessionManager: NSObject, ObservableObject {
         defer { isProcessingCommand = false }
 
         liveUserTranscript = trimmed
+        connectionStatusText = "Thinking..."
 
-        // If full-duplex WebSocket is open, inject directly into live stream
-        if isLiveSessionActive, webSocketTask != nil {
+        // If full-duplex WebSocket is open and setupComplete, inject directly into live stream
+        if isLiveSessionActive, webSocketTask != nil, isSetupComplete {
             injectContextMessageIntoLiveSession(role: "user", text: trimmed, turnComplete: true)
+            connectionStatusText = "Listening • \(vault.activeConversation?.title ?? "CarSpeak Live")"
             return
         }
 
@@ -442,7 +461,9 @@ final class GeminiLiveSessionManager: NSObject, ObservableObject {
                 liveModelTranscript = reply
                 connectionStatusText = vault.activeConversation?.title ?? "CarSpeak Active"
                 SteeringWheelController.shared.updateNowPlayingDashboard()
-                audioEngine.speakFallbackText(reply)
+                if !isLiveSessionActive {
+                    audioEngine.speakFallbackText(reply)
+                }
             }
         } catch {
             connectionStatusText = "Offline Cache Active — Retrying 5G..."

@@ -54,7 +54,7 @@ jobs:
           echo "$APP_STORE_CONNECT_PRIVATE_KEY" > ~/.appstoreconnect/private_keys/AuthKey_38F6WA87DU.p8
           chmod 600 ~/.appstoreconnect/private_keys/AuthKey_38F6WA87DU.p8
 
-      - name: 🚀 Compile, Archive & Export CarSpeak to TestFlight
+      - name: 🚀 Compile, Embed CarPlay Entitlements & Export to TestFlight
         run: |
           mkdir -p build/archive build/output
           xcodebuild archive \
@@ -67,35 +67,35 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO
 
-          if xcodebuild -exportArchive \
+          echo "🔐 Embedding CarSpeak.entitlements (CarPlay Audio + CarPlay Voice Based Conversation) into Archive Binary..."
+          cat > build/archive_entitlements.plist << 'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>application-identifier</key>
+              <string>523MJL63MC.com.AlexMohit.CarSpeak</string>
+              <key>com.apple.developer.team-identifier</key>
+              <string>523MJL63MC</string>
+              <key>com.apple.developer.carplay-audio</key>
+              <true/>
+              <key>com.apple.developer.carplay-voice-based-conversation</key>
+              <true/>
+          </dict>
+          </plist>
+          EOF
+
+          codesign --force --sign - --entitlements build/archive_entitlements.plist build/archive/CarSpeak.xcarchive/Products/Applications/CarSpeak.app
+          echo "🔎 Verifying Embedded Archive Entitlements:"
+          codesign -d --entitlements :- build/archive/CarSpeak.xcarchive/Products/Applications/CarSpeak.app
+
+          xcodebuild -exportArchive \
             -archivePath build/archive/CarSpeak.xcarchive \
             -exportOptionsPlist ExportOptions.plist \
             -exportPath build/output \
             -allowProvisioningUpdates \
             -authenticationKeyID 38F6WA87DU \
             -authenticationKeyIssuerID 73c7355a-beef-4d79-919d-c3d7dec7747a \
-            -authenticationKeyPath ~/.appstoreconnect/private_keys/AuthKey_38F6WA87DU.p8; then
-            echo "✅ Exported and uploaded with full CarPlay Managed Entitlements!"
-          else
-            echo "⚠️ Managed CarPlay capability checkbox not yet enabled on Bundle ID in developer.apple.com; exporting with Info.plist CarPlay Scene Manifest while Managed Entitlement checkbox is pending..."
-            plutil -replace com\\.apple\\.developer\\.carplay-voice -remove CarSpeak/CarSpeak.entitlements || true
-            plutil -replace com\\.apple\\.developer\\.carplay-audio -remove CarSpeak/CarSpeak.entitlements || true
-            rm -rf build/archive/CarSpeak.xcarchive build/output/*
-            xcodebuild archive \
-              -project CarSpeak.xcodeproj \
-              -scheme CarSpeak \
-              -destination 'generic/platform=iOS' \
-              -sdk iphoneos \
-              -configuration Release \
-              -archivePath build/archive/CarSpeak.xcarchive \
-              CODE_SIGNING_ALLOWED=NO \
-              CODE_SIGNING_REQUIRED=NO
-            xcodebuild -exportArchive \
-              -archivePath build/archive/CarSpeak.xcarchive \
-              -exportOptionsPlist ExportOptions.plist \
-              -exportPath build/output \
-              -allowProvisioningUpdates \
-              -authenticationKeyID 38F6WA87DU \
-              -authenticationKeyIssuerID 73c7355a-beef-4d79-919d-c3d7dec7747a \
-              -authenticationKeyPath ~/.appstoreconnect/private_keys/AuthKey_38F6WA87DU.p8
-          fi
+            -authenticationKeyPath ~/.appstoreconnect/private_keys/AuthKey_38F6WA87DU.p8
+
+          echo "✅ Exported and uploaded with full CarPlay Managed Entitlements (com.apple.developer.carplay-audio + com.apple.developer.carplay-voice-based-conversation)!"
