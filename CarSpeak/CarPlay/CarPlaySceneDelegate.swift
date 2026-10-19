@@ -54,9 +54,7 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
             image: UIImage(systemName: "waveform.circle.fill")
         )
         liveVoiceItem.handler = { [weak self] _, completion in
-            if !manager.isLiveSessionActive {
-                manager.startHandsFreeSession()
-            }
+            manager.startHandsFreeSession(forceRestartAudio: true)
             self?.presentVoiceControlOverlay(
                 title: vault.activeConversation?.title ?? "CarSpeak Hands-Free AI",
                 subtitle: "Listening • 5G Live Stream"

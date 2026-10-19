@@ -8,11 +8,10 @@ struct StartCarSpeakIntent: AppIntent {
     static var openAppWhenRun: Bool = true
 
     @MainActor
-    func perform() async throws -> some IntentResult & ProvidesDialog {
+    func perform() async throws -> some IntentResult {
         SteeringWheelController.shared.configureRemoteCommands()
-        GeminiLiveSessionManager.shared.startHandsFreeSession()
-        let activeTitle = ConversationVaultClient.shared.activeConversation?.title ?? "your active thread"
-        return .result(dialog: "CarSpeak is live on CarPlay. Resuming \(activeTitle).")
+        GeminiLiveSessionManager.shared.startHandsFreeSession(forceRestartAudio: true)
+        return .result()
     }
 }
 
@@ -26,17 +25,20 @@ struct SwitchCarSpeakConversationIntent: AppIntent {
     var topic: String
 
     @MainActor
-    func perform() async throws -> some IntentResult & ProvidesDialog {
+    func perform() async throws -> some IntentResult {
         SteeringWheelController.shared.configureRemoteCommands()
         if !GeminiLiveSessionManager.shared.isLiveSessionActive {
-            GeminiLiveSessionManager.shared.startHandsFreeSession()
+            GeminiLiveSessionManager.shared.startHandsFreeSession(forceRestartAudio: true)
+        } else {
+            GeminiLiveSessionManager.shared.audioEngine.restartEngineAfterSiriOrRouteChange()
         }
         if let switched = await ConversationVaultClient.shared.switchConversation(queryOrId: topic) {
             SteeringWheelController.shared.updateNowPlayingDashboard()
-            return .result(dialog: "Switched CarSpeak to \(switched.title). \(switched.summary)")
+            await GeminiLiveSessionManager.shared.sendVoiceOrTextCommand("We switched to \(switched.title). Briefly summarize where we left off.")
+            return .result()
         }
         await GeminiLiveSessionManager.shared.sendVoiceOrTextCommand("Switch to our conversation on \(topic)")
-        return .result(dialog: "Switched CarSpeak to \(topic).")
+        return .result()
     }
 }
 

@@ -28,6 +28,7 @@ final class GeminiLiveSessionManager: NSObject, ObservableObject {
     private var resumptionHandle: String?
     private var isHealingHandoff: Bool = false
     private var isSetupComplete: Bool = false
+    private var hasSentInitialGreeting: Bool = false
     private var queuedContextMessages: [(role: String, text: String, turnComplete: Bool)] = []
     private var pendingUserTranscriptBuffer: String = ""
     private var pendingModelTranscriptBuffer: String = ""
@@ -66,10 +67,28 @@ final class GeminiLiveSessionManager: NSObject, ObservableObject {
 
     // MARK: - Start / Stop Full-Duplex CarPlay Voice Session
 
-    func startHandsFreeSession() {
-        guard !isLiveSessionActive else { return }
+    func startHandsFreeSession(forceRestartAudio: Bool = false) {
+        if isLiveSessionActive {
+            if forceRestartAudio {
+                audioEngine.startCabinDuplexStream()
+                if isSetupComplete && webSocketTask != nil {
+                    injectContextMessageIntoLiveSession(
+                        role: "user",
+                        text: "[System: The driver just tapped the CarPlay voice button. Speak one brief sentence confirming you are listening.]",
+                        turnComplete: true
+                    )
+                } else {
+                    Task {
+                        await connectLiveWebSocket(isResuming: false)
+                    }
+                }
+            }
+            return
+        }
+
         isLiveSessionActive = true
         isSetupComplete = false
+        hasSentInitialGreeting = false
         connectionStatusText = "Connecting Gemini 3.8 Live (5G Multipath)..."
         telemetry.connectionState = "Connecting"
         audioEngine.startCabinDuplexStream()
@@ -84,6 +103,7 @@ final class GeminiLiveSessionManager: NSObject, ObservableObject {
         isLiveSessionActive = false
         isHealingHandoff = false
         isSetupComplete = false
+        hasSentInitialGreeting = false
         webSocketTask?.cancel(with: .normalClosure, reason: nil)
         webSocketTask = nil
         audioEngine.stopCabinDuplexStream()
@@ -270,7 +290,7 @@ final class GeminiLiveSessionManager: NSObject, ObservableObject {
         guard let data = text.data(using: .utf8),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
 
-        // 0. Server Setup Complete — Flush 5-second circular outbox buffer & any queued prompts
+        // 0. Server Setup Complete — Flush 5-second circular outbox buffer, queued prompts, or speak initial greeting
         if json["setupComplete"] != nil {
             self.isSetupComplete = true
             let missedFrames = self.outboxBuffer.drainPendingFrames(maxAgeSeconds: 5.0)
@@ -279,8 +299,18 @@ final class GeminiLiveSessionManager: NSObject, ObservableObject {
             }
             let queued = self.queuedContextMessages
             self.queuedContextMessages.removeAll()
-            for msg in queued {
-                self.injectContextMessageIntoLiveSession(role: msg.role, text: msg.text, turnComplete: msg.turnComplete)
+            if !queued.isEmpty {
+                self.hasSentInitialGreeting = true
+                for msg in queued {
+                    self.injectContextMessageIntoLiveSession(role: msg.role, text: msg.text, turnComplete: msg.turnComplete)
+                }
+            } else if !self.hasSentInitialGreeting {
+                self.hasSentInitialGreeting = true
+                self.injectContextMessageIntoLiveSession(
+                    role: "user",
+                    text: "[System: Hands-free voice session connected. Greet Alex in one short sentence ('CarSpeak online, ready when you are') and ask what topic or project he would like to discuss.]",
+                    turnComplete: true
+                )
             }
         }
 
@@ -425,6 +455,7 @@ final class GeminiLiveSessionManager: NSObject, ObservableObject {
 
         // If full-duplex WebSocket is open and setupComplete, inject directly into live stream
         if isLiveSessionActive, webSocketTask != nil, isSetupComplete {
+            audioEngine.restartEngineAfterSiriOrRouteChange()
             injectContextMessageIntoLiveSession(role: "user", text: trimmed, turnComplete: true)
             connectionStatusText = "Listening • \(vault.activeConversation?.title ?? "CarSpeak Live")"
             return
@@ -461,9 +492,7 @@ final class GeminiLiveSessionManager: NSObject, ObservableObject {
                 liveModelTranscript = reply
                 connectionStatusText = vault.activeConversation?.title ?? "CarSpeak Active"
                 SteeringWheelController.shared.updateNowPlayingDashboard()
-                if !isLiveSessionActive {
-                    audioEngine.speakFallbackText(reply)
-                }
+                audioEngine.speakFallbackText(reply)
             }
         } catch {
             connectionStatusText = "Offline Cache Active — Retrying 5G..."

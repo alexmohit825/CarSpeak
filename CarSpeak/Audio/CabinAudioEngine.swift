@@ -2,9 +2,8 @@ import Foundation
 import AVFoundation
 
 /// Hardware-accelerated CarPlay & In-Cabin Audio Engine.
-/// Uses `AVAudioSession.Mode.voiceChat` with `.allowBluetooth` and `.allowBluetoothA2DP`
-/// to route seamlessly through the vehicle's factory cabin microphone array and speakers,
-/// with hardware Acoustic Echo Cancellation (AEC) so the mic never re-triggers on AI speech.
+/// Routes seamlessly through Apple CarPlay (`.carAudio`), Bluetooth A2DP/HFP, or iPhone speaker,
+/// with automatic post-Siri interruption recovery and Float32 resampling.
 final class CabinAudioEngine: NSObject, ObservableObject {
     @Published var isCapturing: Bool = false
     @Published var isMuted: Bool = false
@@ -18,25 +17,79 @@ final class CabinAudioEngine: NSObject, ObservableObject {
         standardFormatWithSampleRate: 24000,
         channels: 1
     )!
+    /// Standard 32-bit Float non-interleaved 16kHz mono format for hardware resampler
+    private let float16kFormat = AVAudioFormat(
+        standardFormatWithSampleRate: 16000,
+        channels: 1
+    )!
 
     private let speechSynthesizer = AVSpeechSynthesizer()
+    private var shouldBeCapturing: Bool = false
+    private var watchdogTimer: Timer?
     var onPCM16ChunkCaptured: ((Data) -> Void)?
 
     override init() {
         super.init()
         speechSynthesizer.delegate = self
+        setupAudioSessionObservers()
+    }
+
+    private func setupAudioSessionObservers() {
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleAudioInterruption(_:)),
+            name: AVAudioSession.interruptionNotification,
+            object: AVAudioSession.sharedInstance()
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleRouteChange(_:)),
+            name: AVAudioSession.routeChangeNotification,
+            object: AVAudioSession.sharedInstance()
+        )
+    }
+
+    @objc private func handleAudioInterruption(_ notification: Notification) {
+        guard let userInfo = notification.userInfo,
+              let typeValue = userInfo[AVAudioSessionInterruptionTypeKey] as? UInt,
+              let type = AVAudioSession.InterruptionType(rawValue: typeValue) else { return }
+
+        if type == .ended, shouldBeCapturing {
+            // Siri or system alert finished — immediately reclaim CarPlay audio session & restart engine
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+                self?.restartEngineAfterSiriOrRouteChange()
+            }
+        }
+    }
+
+    @objc private func handleRouteChange(_ notification: Notification) {
+        guard shouldBeCapturing else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+            guard let self = self, self.shouldBeCapturing, !self.audioEngine.isRunning else { return }
+            self.restartEngineAfterSiriOrRouteChange()
+        }
     }
 
     func configureCarPlayAudioSession() {
         let session = AVAudioSession.sharedInstance()
         do {
+            let hasExternalCarOrBT = session.currentRoute.outputs.contains { port in
+                port.portType == .carAudio ||
+                port.portType == .bluetoothA2DP ||
+                port.portType == .bluetoothHFP ||
+                port.portType == .bluetoothLE
+            }
+
+            var options: AVAudioSession.CategoryOptions = [.allowBluetooth, .allowBluetoothA2DP, .duckOthers]
+            if !hasExternalCarOrBT {
+                options.insert(.defaultToSpeaker)
+            }
+
             try session.setCategory(
                 .playAndRecord,
-                mode: .voiceChat,
-                options: [.allowBluetooth, .allowBluetoothA2DP, .defaultToSpeaker, .duckOthers]
+                mode: .default,
+                options: options
             )
-            try session.setPreferredSampleRate(16000)
-            try session.setPreferredIOBufferDuration(0.064)
             try session.setActive(true, options: .notifyOthersOnDeactivation)
         } catch {
             print("[CabinAudioEngine] AudioSession configuration warning: \(error.localizedDescription)")
@@ -44,58 +97,91 @@ final class CabinAudioEngine: NSObject, ObservableObject {
     }
 
     func startCabinDuplexStream() {
-        guard !isCapturing else { return }
+        shouldBeCapturing = true
+
+        AVAudioSession.sharedInstance().requestRecordPermission { [weak self] granted in
+            guard let self = self, granted else { return }
+            DispatchQueue.main.async {
+                self.configureAndStartEngineInternal()
+                self.startPostSiriWatchdog()
+            }
+        }
+    }
+
+    private func startPostSiriWatchdog() {
+        watchdogTimer?.invalidate()
+        // Re-verify engine is running 0.9s and 2.0s after launch in case Siri was dismissing during startup
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) { [weak self] in
+            guard let self = self, self.shouldBeCapturing else { return }
+            if !self.audioEngine.isRunning || !self.playerNode.isPlaying {
+                self.restartEngineAfterSiriOrRouteChange()
+            }
+        }
+        watchdogTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+            guard let self = self, self.shouldBeCapturing else { return }
+            if !self.audioEngine.isRunning {
+                self.restartEngineAfterSiriOrRouteChange()
+            }
+        }
+    }
+
+    func restartEngineAfterSiriOrRouteChange() {
+        guard shouldBeCapturing else { return }
+        configureAndStartEngineInternal()
+    }
+
+    private func configureAndStartEngineInternal() {
         configureCarPlayAudioSession()
 
-        let inputNode = audioEngine.inputNode
-        if #available(iOS 13.0, *) {
-            try? inputNode.setVoiceProcessingEnabled(true)
+        if audioEngine.isRunning {
+            audioEngine.stop()
         }
+
+        let inputNode = audioEngine.inputNode
+        inputNode.removeTap(onBus: 0)
 
         if !audioEngine.attachedNodes.contains(playerNode) {
             audioEngine.attach(playerNode)
-            audioEngine.connect(playerNode, to: audioEngine.mainMixerNode, format: playbackFormat)
         }
+        audioEngine.connect(playerNode, to: audioEngine.mainMixerNode, format: playbackFormat)
 
-        let hwFormat = inputNode.inputFormat(forBus: 0)
-        guard hwFormat.sampleRate > 0 else { return }
+        let recordingFormat = inputNode.outputFormat(forBus: 0)
+        if recordingFormat.sampleRate > 0 && recordingFormat.channelCount > 0 {
+            let converter = AVAudioConverter(from: recordingFormat, to: float16kFormat)
+            let targetFormat = float16kFormat
 
-        let targetFormat = AVAudioFormat(
-            commonFormat: .pcmFormatInt16,
-            sampleRate: 16000,
-            channels: 1,
-            interleaved: true
-        )!
+            inputNode.installTap(onBus: 0, bufferSize: 2048, format: recordingFormat) { [weak self] buffer, _ in
+                guard let self = self, !self.isMuted else { return }
+                self.computeRMS(buffer: buffer)
 
-        let converter = AVAudioConverter(from: hwFormat, to: targetFormat)
+                guard let converter = converter else { return }
+                let ratio = 16000.0 / recordingFormat.sampleRate
+                let capacity = AVAudioFrameCount(Double(buffer.frameLength) * ratio) + 32
+                guard let floatBuffer = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: capacity) else { return }
 
-        inputNode.removeTap(onBus: 0)
-        inputNode.installTap(onBus: 0, bufferSize: 2048, format: hwFormat) { [weak self] buffer, _ in
-            guard let self = self, !self.isMuted else { return }
-            self.computeRMS(buffer: buffer)
-
-            guard let converter = converter else { return }
-            let ratio = 16000.0 / hwFormat.sampleRate
-            let capacity = AVAudioFrameCount(Double(buffer.frameLength) * ratio) + 16
-            guard let pcmBuffer = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: capacity) else { return }
-
-            var error: NSError?
-            var didProvideBuffer = false
-            let inputBlock: AVAudioConverterInputBlock = { _, outStatus in
-                if didProvideBuffer {
-                    outStatus.pointee = .noDataNow
-                    return nil
+                var error: NSError?
+                var didProvideBuffer = false
+                let inputBlock: AVAudioConverterInputBlock = { _, outStatus in
+                    if didProvideBuffer {
+                        outStatus.pointee = .noDataNow
+                        return nil
+                    }
+                    didProvideBuffer = true
+                    outStatus.pointee = .haveData
+                    return buffer
                 }
-                didProvideBuffer = true
-                outStatus.pointee = .haveData
-                return buffer
-            }
-            converter.convert(to: pcmBuffer, error: &error, withInputFrom: inputBlock)
+                converter.convert(to: floatBuffer, error: &error, withInputFrom: inputBlock)
 
-            if error == nil, pcmBuffer.frameLength > 0, let int16Ptr = pcmBuffer.int16ChannelData {
-                let byteCount = Int(pcmBuffer.frameLength) * MemoryLayout<Int16>.size
-                let data = Data(bytes: int16Ptr[0], count: byteCount)
-                self.onPCM16ChunkCaptured?(data)
+                let frameLen = Int(floatBuffer.frameLength)
+                if error == nil, frameLen > 0, let floatPtr = floatBuffer.floatChannelData?[0] {
+                    var pcm16Samples = [Int16](repeating: 0, count: frameLen)
+                    for i in 0..<frameLen {
+                        let clamped = max(-1.0, min(1.0, floatPtr[i]))
+                        pcm16Samples[i] = Int16(clamped * 32767.0)
+                    }
+                    let data = pcm16Samples.withUnsafeBufferPointer { Data(buffer: $0) }
+                    self.onPCM16ChunkCaptured?(data)
+                }
             }
         }
 
@@ -113,7 +199,9 @@ final class CabinAudioEngine: NSObject, ObservableObject {
     }
 
     func stopCabinDuplexStream() {
-        guard isCapturing else { return }
+        shouldBeCapturing = false
+        watchdogTimer?.invalidate()
+        watchdogTimer = nil
         audioEngine.inputNode.removeTap(onBus: 0)
         playerNode.stop()
         audioEngine.stop()
@@ -129,8 +217,14 @@ final class CabinAudioEngine: NSObject, ObservableObject {
     }
 
     /// Converts 24kHz PCM16 little-endian audio chunks from Gemini 3.8 Live into Float32 buffers for iOS AVAudioPlayerNode.
+    /// Automatically wakes the playback engine if it was paused by Siri or a route change.
     func enqueueLiveOutputPCM24k(_ data: Data) {
-        guard data.count >= 2, isCapturing else { return }
+        guard data.count >= 2 else { return }
+
+        if !audioEngine.isRunning {
+            configureAndStartEngineInternal()
+        }
+
         let sampleCount = data.count / MemoryLayout<Int16>.size
         let frameCount = AVAudioFrameCount(sampleCount)
         guard frameCount > 0,
@@ -149,20 +243,20 @@ final class CabinAudioEngine: NSObject, ObservableObject {
         DispatchQueue.main.async {
             self.isPlayingOutput = true
         }
+        if !playerNode.isPlaying {
+            playerNode.play()
+        }
         playerNode.scheduleBuffer(buffer) { [weak self] in
             DispatchQueue.main.async {
                 self?.isPlayingOutput = false
             }
-        }
-        if !playerNode.isPlaying {
-            playerNode.play()
         }
     }
 
     /// Immediately clears playback queue when Dr. Mohit barges in or presses Next Track (>>) on steering wheel.
     func interruptPlaybackImmediately() {
         playerNode.stop()
-        if isCapturing {
+        if audioEngine.isRunning {
             playerNode.play()
         }
         if speechSynthesizer.isSpeaking {
