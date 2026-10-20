@@ -1,9 +1,13 @@
 import Foundation
 import AVFoundation
 
-/// Hardware-accelerated CarPlay & In-Cabin Audio Engine.
-/// Routes seamlessly through Apple CarPlay (`.carAudio`), Bluetooth A2DP/HFP, or iPhone speaker,
-/// with automatic post-Siri interruption recovery and Float32 resampling.
+/// Rebuilt Hardware-Accelerated CarPlay & In-Cabin Audio Engine.
+/// Key Guarantees:
+/// 1. Strict Half-Duplex Speaker Priority Gate (`isAISpeaking` + 450ms acoustic tail): The microphone tap NEVER
+///    transmits room audio while Gemini is speaking, making "CarSpeak, CarSpeak" echo/self-interruption impossible.
+/// 2. 200ms Jitter Pre-Buffer (`pendingPlaybackData`): Coalesces small 24kHz WebSocket audio packets into smooth,
+///    continuous buffers so 5G packet jitter never causes stuttering or mid-sentence cut-outs.
+/// 3. Zero Mid-Stream Engine Stops: Never calls `audioEngine.stop()` while a session is active.
 final class CabinAudioEngine: NSObject, ObservableObject {
     @Published var isCapturing: Bool = false
     @Published var isMuted: Bool = false
@@ -25,8 +29,24 @@ final class CabinAudioEngine: NSObject, ObservableObject {
 
     private let speechSynthesizer = AVSpeechSynthesizer()
     private var shouldBeCapturing: Bool = false
-    private var watchdogTimer: Timer?
+    private var hasInstalledTap: Bool = false
+
+    /// Tracks active scheduled buffers and post-speech acoustic reverb tail to prevent mic self-triggering
+    private let bufferLock = NSLock()
+    private var activeScheduledBuffers: Int = 0
+    private var speechTailDeadline: Date = .distantPast
+    private var pendingPlaybackData = Data()
+    /// 180ms of 24kHz 16-bit mono PCM = 8640 bytes
+    private let minCoalesceBytes: Int = 8640
+
     var onPCM16ChunkCaptured: ((Data) -> Void)?
+
+    var isAISpeakingOrInTail: Bool {
+        bufferLock.lock()
+        let active = activeScheduledBuffers > 0 || Date() < speechTailDeadline || speechSynthesizer.isSpeaking
+        bufferLock.unlock()
+        return active
+    }
 
     override init() {
         super.init()
@@ -41,12 +61,6 @@ final class CabinAudioEngine: NSObject, ObservableObject {
             name: AVAudioSession.interruptionNotification,
             object: AVAudioSession.sharedInstance()
         )
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(handleRouteChange(_:)),
-            name: AVAudioSession.routeChangeNotification,
-            object: AVAudioSession.sharedInstance()
-        )
     }
 
     @objc private func handleAudioInterruption(_ notification: Notification) {
@@ -55,18 +69,9 @@ final class CabinAudioEngine: NSObject, ObservableObject {
               let type = AVAudioSession.InterruptionType(rawValue: typeValue) else { return }
 
         if type == .ended, shouldBeCapturing {
-            // Siri or system alert finished — immediately reclaim CarPlay audio session & restart engine
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
-                self?.restartEngineAfterSiriOrRouteChange()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
+                self?.ensureEngineRunning()
             }
-        }
-    }
-
-    @objc private func handleRouteChange(_ notification: Notification) {
-        guard shouldBeCapturing else { return }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-            guard let self = self, self.shouldBeCapturing, !self.audioEngine.isRunning else { return }
-            self.restartEngineAfterSiriOrRouteChange()
         }
     }
 
@@ -102,111 +107,111 @@ final class CabinAudioEngine: NSObject, ObservableObject {
         AVAudioSession.sharedInstance().requestRecordPermission { [weak self] granted in
             guard let self = self, granted else { return }
             DispatchQueue.main.async {
-                self.configureAndStartEngineInternal()
-                self.startPostSiriWatchdog()
-            }
-        }
-    }
-
-    private func startPostSiriWatchdog() {
-        watchdogTimer?.invalidate()
-        // Re-verify engine is running 0.9s and 2.0s after launch in case Siri was dismissing during startup
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) { [weak self] in
-            guard let self = self, self.shouldBeCapturing else { return }
-            if !self.audioEngine.isRunning || !self.playerNode.isPlaying {
-                self.restartEngineAfterSiriOrRouteChange()
-            }
-        }
-        watchdogTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
-            guard let self = self, self.shouldBeCapturing else { return }
-            if !self.audioEngine.isRunning {
-                self.restartEngineAfterSiriOrRouteChange()
+                self.ensureEngineRunning()
             }
         }
     }
 
     func restartEngineAfterSiriOrRouteChange() {
         guard shouldBeCapturing else { return }
-        configureAndStartEngineInternal()
+        ensureEngineRunning()
     }
 
-    private func configureAndStartEngineInternal() {
+    func ensureEngineRunning() {
         configureCarPlayAudioSession()
-
-        if audioEngine.isRunning {
-            audioEngine.stop()
-        }
-
-        let inputNode = audioEngine.inputNode
-        inputNode.removeTap(onBus: 0)
 
         if !audioEngine.attachedNodes.contains(playerNode) {
             audioEngine.attach(playerNode)
+            audioEngine.connect(playerNode, to: audioEngine.mainMixerNode, format: playbackFormat)
         }
-        audioEngine.connect(playerNode, to: audioEngine.mainMixerNode, format: playbackFormat)
 
-        let recordingFormat = inputNode.outputFormat(forBus: 0)
-        if recordingFormat.sampleRate > 0 && recordingFormat.channelCount > 0 {
-            let converter = AVAudioConverter(from: recordingFormat, to: float16kFormat)
-            let targetFormat = float16kFormat
+        if !hasInstalledTap {
+            let inputNode = audioEngine.inputNode
+            let recordingFormat = inputNode.outputFormat(forBus: 0)
+            if recordingFormat.sampleRate > 0 && recordingFormat.channelCount > 0 {
+                let converter = AVAudioConverter(from: recordingFormat, to: float16kFormat)
+                let targetFormat = float16kFormat
 
-            inputNode.installTap(onBus: 0, bufferSize: 2048, format: recordingFormat) { [weak self] buffer, _ in
-                guard let self = self, !self.isMuted else { return }
-                self.computeRMS(buffer: buffer)
-
-                guard let converter = converter else { return }
-                let ratio = 16000.0 / recordingFormat.sampleRate
-                let capacity = AVAudioFrameCount(Double(buffer.frameLength) * ratio) + 32
-                guard let floatBuffer = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: capacity) else { return }
-
-                var error: NSError?
-                var didProvideBuffer = false
-                let inputBlock: AVAudioConverterInputBlock = { _, outStatus in
-                    if didProvideBuffer {
-                        outStatus.pointee = .noDataNow
-                        return nil
+                inputNode.removeTap(onBus: 0)
+                inputNode.installTap(onBus: 0, bufferSize: 4096, format: recordingFormat) { [weak self] buffer, _ in
+                    guard let self = self, !self.isMuted else { return }
+                    // CRITICAL HALF-DUPLEX GATE: Never capture or send mic audio while Gemini is speaking
+                    // or within 450ms after Gemini finishes speaking (prevents speaker-to-mic feedback loop).
+                    if self.isAISpeakingOrInTail {
+                        DispatchQueue.main.async {
+                            self.inputLevel = 0.05
+                        }
+                        return
                     }
-                    didProvideBuffer = true
-                    outStatus.pointee = .haveData
-                    return buffer
-                }
-                converter.convert(to: floatBuffer, error: &error, withInputFrom: inputBlock)
 
-                let frameLen = Int(floatBuffer.frameLength)
-                if error == nil, frameLen > 0, let floatPtr = floatBuffer.floatChannelData?[0] {
-                    var pcm16Samples = [Int16](repeating: 0, count: frameLen)
-                    for i in 0..<frameLen {
-                        let clamped = max(-1.0, min(1.0, floatPtr[i]))
-                        pcm16Samples[i] = Int16(clamped * 32767.0)
+                    self.computeRMS(buffer: buffer)
+
+                    guard let converter = converter else { return }
+                    let ratio = 16000.0 / recordingFormat.sampleRate
+                    let capacity = AVAudioFrameCount(Double(buffer.frameLength) * ratio) + 32
+                    guard let floatBuffer = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: capacity) else { return }
+
+                    var error: NSError?
+                    var didProvideBuffer = false
+                    let inputBlock: AVAudioConverterInputBlock = { _, outStatus in
+                        if didProvideBuffer {
+                            outStatus.pointee = .noDataNow
+                            return nil
+                        }
+                        didProvideBuffer = true
+                        outStatus.pointee = .haveData
+                        return buffer
                     }
-                    let data = pcm16Samples.withUnsafeBufferPointer { Data(buffer: $0) }
-                    self.onPCM16ChunkCaptured?(data)
+                    converter.convert(to: floatBuffer, error: &error, withInputFrom: inputBlock)
+
+                    let frameLen = Int(floatBuffer.frameLength)
+                    if error == nil, frameLen > 0, let floatPtr = floatBuffer.floatChannelData?[0] {
+                        var pcm16Samples = [Int16](repeating: 0, count: frameLen)
+                        for i in 0..<frameLen {
+                            let clamped = max(-1.0, min(1.0, floatPtr[i]))
+                            pcm16Samples[i] = Int16(clamped * 32767.0)
+                        }
+                        let data = pcm16Samples.withUnsafeBufferPointer { Data(buffer: $0) }
+                        self.onPCM16ChunkCaptured?(data)
+                    }
                 }
+                hasInstalledTap = true
             }
         }
 
-        do {
-            audioEngine.prepare()
-            try audioEngine.start()
+        if !audioEngine.isRunning {
+            do {
+                audioEngine.prepare()
+                try audioEngine.start()
+                playerNode.play()
+                DispatchQueue.main.async {
+                    self.isCapturing = true
+                }
+            } catch {
+                print("[CabinAudioEngine] Start error: \(error.localizedDescription)")
+            }
+        } else if !playerNode.isPlaying {
             playerNode.play()
-            DispatchQueue.main.async {
-                self.isCapturing = true
-            }
-            AcousticEarcons.shared.play(.sessionReady)
-        } catch {
-            print("[CabinAudioEngine] Start error: \(error.localizedDescription)")
         }
     }
 
     func stopCabinDuplexStream() {
         shouldBeCapturing = false
-        watchdogTimer?.invalidate()
-        watchdogTimer = nil
-        audioEngine.inputNode.removeTap(onBus: 0)
+        if hasInstalledTap {
+            audioEngine.inputNode.removeTap(onBus: 0)
+            hasInstalledTap = false
+        }
+        bufferLock.lock()
+        pendingPlaybackData.removeAll()
+        activeScheduledBuffers = 0
+        speechTailDeadline = .distantPast
+        bufferLock.unlock()
+
         playerNode.stop()
         audioEngine.stop()
         DispatchQueue.main.async {
             self.isCapturing = false
+            self.isPlayingOutput = false
             self.inputLevel = 0.0
         }
     }
@@ -216,45 +221,97 @@ final class CabinAudioEngine: NSObject, ObservableObject {
         AcousticEarcons.shared.play(isMuted ? .micMuted : .micUnmuted)
     }
 
-    /// Converts 24kHz PCM16 little-endian audio chunks from Gemini 3.8 Live into Float32 buffers for iOS AVAudioPlayerNode.
-    /// Automatically wakes the playback engine if it was paused by Siri or a route change.
+    /// Accumulates incoming 24kHz PCM16 audio chunks into smooth 180ms+ coalesced buffers to eliminate packet jitter.
     func enqueueLiveOutputPCM24k(_ data: Data) {
         guard data.count >= 2 else { return }
 
-        if !audioEngine.isRunning {
-            configureAndStartEngineInternal()
+        bufferLock.lock()
+        pendingPlaybackData.append(data)
+        let shouldFlushNow = pendingPlaybackData.count >= minCoalesceBytes
+        var chunkToSchedule: Data? = nil
+        if shouldFlushNow {
+            chunkToSchedule = pendingPlaybackData
+            pendingPlaybackData = Data()
         }
+        bufferLock.unlock()
 
-        let sampleCount = data.count / MemoryLayout<Int16>.size
-        let frameCount = AVAudioFrameCount(sampleCount)
-        guard frameCount > 0,
-              let buffer = AVAudioPCMBuffer(pcmFormat: playbackFormat, frameCapacity: frameCount),
-              let floatChannel = buffer.floatChannelData?[0] else { return }
-        buffer.frameLength = frameCount
+        if let chunk = chunkToSchedule {
+            scheduleCoalescedPCM24k(chunk)
+        }
+    }
 
-        data.withUnsafeBytes { rawBufferPointer in
-            guard let int16Ptr = rawBufferPointer.bindMemory(to: Int16.self).baseAddress else { return }
-            for i in 0..<sampleCount {
-                let sample = Int16(littleEndian: int16Ptr[i])
-                floatChannel[i] = Float(sample) / 32768.0
+    /// Flushes any remaining sub-180ms tail of audio at the end of a model turn.
+    func flushPlaybackBuffer() {
+        bufferLock.lock()
+        let remaining = pendingPlaybackData
+        pendingPlaybackData = Data()
+        bufferLock.unlock()
+
+        if remaining.count >= 2 {
+            scheduleCoalescedPCM24k(remaining)
+        }
+    }
+
+    private func scheduleCoalescedPCM24k(_ data: Data) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            if !self.audioEngine.isRunning {
+                self.ensureEngineRunning()
             }
-        }
 
-        DispatchQueue.main.async {
+            let sampleCount = data.count / MemoryLayout<Int16>.size
+            let frameCount = AVAudioFrameCount(sampleCount)
+            guard frameCount > 0,
+                  let buffer = AVAudioPCMBuffer(pcmFormat: self.playbackFormat, frameCapacity: frameCount),
+                  let floatChannel = buffer.floatChannelData?[0] else { return }
+            buffer.frameLength = frameCount
+
+            data.withUnsafeBytes { rawBufferPointer in
+                guard let int16Ptr = rawBufferPointer.bindMemory(to: Int16.self).baseAddress else { return }
+                for i in 0..<sampleCount {
+                    let sample = Int16(littleEndian: int16Ptr[i])
+                    floatChannel[i] = Float(sample) / 32768.0
+                }
+            }
+
+            self.bufferLock.lock()
+            self.activeScheduledBuffers += 1
+            self.speechTailDeadline = Date().addingTimeInterval(0.6)
+            self.bufferLock.unlock()
+
             self.isPlayingOutput = true
-        }
-        if !playerNode.isPlaying {
-            playerNode.play()
-        }
-        playerNode.scheduleBuffer(buffer) { [weak self] in
-            DispatchQueue.main.async {
-                self?.isPlayingOutput = false
+            if !self.playerNode.isPlaying {
+                self.playerNode.play()
+            }
+
+            self.playerNode.scheduleBuffer(buffer) { [weak self] in
+                guard let self = self else { return }
+                self.bufferLock.lock()
+                self.activeScheduledBuffers = max(0, self.activeScheduledBuffers - 1)
+                let stillActive = self.activeScheduledBuffers > 0
+                if !stillActive {
+                    // Hold mic gate for 450ms after final speaker buffer finishes so room echo decays completely
+                    self.speechTailDeadline = Date().addingTimeInterval(0.45)
+                }
+                self.bufferLock.unlock()
+
+                if !stillActive {
+                    DispatchQueue.main.async {
+                        self.isPlayingOutput = false
+                    }
+                }
             }
         }
     }
 
-    /// Immediately clears playback queue when Dr. Mohit barges in or presses Next Track (>>) on steering wheel.
+    /// Immediately clears playback queue when Dr. Mohit explicitly taps Stop Audio or Next Track (>>).
     func interruptPlaybackImmediately() {
+        bufferLock.lock()
+        pendingPlaybackData.removeAll()
+        activeScheduledBuffers = 0
+        speechTailDeadline = Date().addingTimeInterval(0.25)
+        bufferLock.unlock()
+
         playerNode.stop()
         if audioEngine.isRunning {
             playerNode.play()
@@ -273,6 +330,10 @@ final class CabinAudioEngine: NSObject, ObservableObject {
         if speechSynthesizer.isSpeaking {
             speechSynthesizer.stopSpeaking(at: .immediate)
         }
+        bufferLock.lock()
+        speechTailDeadline = Date().addingTimeInterval(2.0)
+        bufferLock.unlock()
+
         let utterance = AVSpeechUtterance(string: text)
         utterance.voice = AVSpeechSynthesisVoice(language: "en-US")
         utterance.rate = 0.52
@@ -302,6 +363,9 @@ final class CabinAudioEngine: NSObject, ObservableObject {
 
 extension CabinAudioEngine: AVSpeechSynthesizerDelegate {
     func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
+        bufferLock.lock()
+        speechTailDeadline = Date().addingTimeInterval(0.45)
+        bufferLock.unlock()
         DispatchQueue.main.async {
             self.isPlayingOutput = false
         }

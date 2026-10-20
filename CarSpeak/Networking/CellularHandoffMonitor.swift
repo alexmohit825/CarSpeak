@@ -1,9 +1,9 @@
 import Foundation
 import Network
 
-/// Monitors 5G cellular tower transitions and Wi-Fi-to-5G handoffs (e.g., pulling out of the garage).
-/// Triggers a proactive sub-250ms socket heal with the active Gemini 3.8 Live `sessionResumption` handle
-/// before standard TCP Head-of-Line (HoL) retransmission timeouts can stall the conversation.
+/// Monitors network reachability for CarSpeak without tearing down active Wireless CarPlay (Wi-Fi + 5G) sockets.
+/// Relies on iOS `URLSessionConfiguration.multipathServiceType = .handover` for seamless interface switching,
+/// and only notifies when recovering from a true `.unsatisfied` offline drop.
 final class CellularHandoffMonitor: ObservableObject {
     @Published var currentInterface: String = "5G / Wi-Fi Ready"
     @Published var handoffCount: Int = 0
@@ -11,7 +11,7 @@ final class CellularHandoffMonitor: ObservableObject {
 
     private let monitor = NWPathMonitor()
     private let queue = DispatchQueue(label: "com.AlexMohit.CarSpeak.CellularHandoffMonitor", qos: .userInteractive)
-    private var lastInterfaceSignature: String = ""
+    private var wasOffline: Bool = false
 
     var onProactiveHandoffDetected: ((String) -> Void)?
 
@@ -24,17 +24,19 @@ final class CellularHandoffMonitor: ObservableObject {
             guard let self = self else { return }
             let usesCellular = path.usesInterfaceType(.cellular)
             let usesWifi = path.usesInterfaceType(.wifi)
-            let interfaceDesc = usesCellular ? "5G Cellular Multipath" : (usesWifi ? "Wi-Fi + 5G Standby" : "Interface Transition")
-            let signature = "\(path.status)-\(usesCellular)-\(usesWifi)-\(path.isExpensive)"
+            let interfaceDesc = usesCellular ? "5G Cellular Multipath" : (usesWifi ? "Wi-Fi + 5G Standby" : "Offline")
+            let satisfied = (path.status == .satisfied)
 
             DispatchQueue.main.async {
-                self.isConnected = (path.status == .satisfied)
+                self.isConnected = satisfied
                 self.currentInterface = interfaceDesc
-                if !self.lastInterfaceSignature.isEmpty && self.lastInterfaceSignature != signature && path.status == .satisfied {
+                // Only trigger socket recovery if we were truly offline (.unsatisfied) and just regained connectivity.
+                // Never tear down an active socket when Wireless CarPlay Wi-Fi and 5G Cellular coexist.
+                if self.wasOffline && satisfied {
                     self.handoffCount += 1
                     self.onProactiveHandoffDetected?(interfaceDesc)
                 }
-                self.lastInterfaceSignature = signature
+                self.wasOffline = !satisfied
             }
         }
         monitor.start(queue: queue)
