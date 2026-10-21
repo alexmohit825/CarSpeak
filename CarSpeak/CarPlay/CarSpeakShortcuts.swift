@@ -4,8 +4,8 @@ import AppIntents
 @available(iOS 17.0, *)
 struct StartCarSpeakIntent: AudioStartingIntent {
     static var title: LocalizedStringResource = "Start CarSpeak Hands-Free Session"
-    static var description = IntentDescription("Launches CarSpeak directly into hands-free CarPlay cabin audio mode without requiring iPhone unlock.")
-    /// CRITICAL FOR CARPLAY: Must be false so Siri does not attempt to foreground the locked iPhone UIWindowScene
+    static var description = IntentDescription("Launches CarSpeak directly into hands-free cabin audio mode.")
+    /// CRITICAL FOR CARPLAY: Must be false so Siri does not attempt to foreground the locked device UIWindowScene
     /// (which times out after ~7 seconds while driving and causes Siri to say "Something went wrong. Please try again").
     static var openAppWhenRun: Bool = false
 
