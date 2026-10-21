@@ -72,6 +72,29 @@ final class GeminiLiveSessionManager: NSObject, ObservableObject {
 
     // MARK: - Start / Stop Full-Duplex CarPlay Voice Session
 
+    func restartOrStartHandsFreeSession() {
+        if isLiveSessionActive {
+            audioEngine.ensureEngineRunning()
+            if isSetupComplete && webSocketTask != nil {
+                injectContextMessageIntoLiveSession(
+                    role: "user",
+                    text: "Say 'CarSpeak ready. What would you like to discuss?' in one short sentence.",
+                    turnComplete: true
+                )
+                return
+            }
+            webSocketTask?.cancel(with: .goingAway, reason: nil)
+            webSocketTask = nil
+            isSetupComplete = false
+            shouldSendGreetingOnSetup = true
+            Task {
+                await connectLiveWebSocket(isResuming: false)
+            }
+            return
+        }
+        startHandsFreeSession()
+    }
+
     func startHandsFreeSession(forceRestartAudio: Bool = false) {
         if isLiveSessionActive {
             if forceRestartAudio {

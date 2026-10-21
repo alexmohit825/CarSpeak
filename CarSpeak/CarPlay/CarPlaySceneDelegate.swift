@@ -33,6 +33,17 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
             .store(in: &cancellables)
     }
 
+    func sceneDidBecomeActive(_ scene: UIScene) {
+        // Whenever Dr. Mohit taps the CarSpeak icon on the CarPlay dashboard, ensure the audio engine
+        // and Gemini 3.8 Live session are awake and ready without needing Siri.
+        SteeringWheelController.shared.configureRemoteCommands()
+        if !GeminiLiveSessionManager.shared.isLiveSessionActive {
+            GeminiLiveSessionManager.shared.startHandsFreeSession()
+        } else {
+            GeminiLiveSessionManager.shared.audioEngine.ensureEngineRunning()
+        }
+    }
+
     func templateApplicationScene(
         _ templateApplicationScene: CPTemplateApplicationScene,
         didDisconnectInterfaceController interfaceController: CPInterfaceController
@@ -49,12 +60,12 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
 
         // 1. Live Voice Co-Pilot Control Section (Always Available at Top)
         let liveVoiceItem = CPListItem(
-            text: manager.isLiveSessionActive ? "🎙️ Active Live Voice Session (Tap for Voice HUD)" : "🎙️ Start Hands-Free Voice Conversation",
+            text: manager.isLiveSessionActive ? "🎙️ Tap to Speak / Reconnect Voice Session" : "🎙️ Start Hands-Free Voice Conversation",
             detailText: "5G Multipath • Speak anytime or say 'Switch to project...'",
             image: UIImage(systemName: "waveform.circle.fill")
         )
         liveVoiceItem.handler = { [weak self] _, completion in
-            manager.startHandsFreeSession(forceRestartAudio: true)
+            manager.restartOrStartHandsFreeSession()
             self?.presentVoiceControlOverlay(
                 title: vault.activeConversation?.title ?? "CarSpeak Hands-Free AI",
                 subtitle: "Listening • 5G Live Stream"
@@ -72,6 +83,7 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
                 )
                 item.handler = { [weak self] _, completion in
                     Task {
+                        manager.audioEngine.ensureEngineRunning()
                         _ = await vault.switchConversation(queryOrId: thread.id)
                         await manager.sendVoiceOrTextCommand("Switch to our conversation \(thread.title) and summarize where we left off.")
                         self?.presentVoiceControlOverlay(title: thread.title, subtitle: thread.projectName ?? "Active Thread")
@@ -93,6 +105,8 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
                 Task {
                     if !manager.isLiveSessionActive {
                         manager.startHandsFreeSession()
+                    } else {
+                        manager.audioEngine.ensureEngineRunning()
                     }
                     await manager.sendVoiceOrTextCommand("Let's pick up where we left off on \(proj.displayName).")
                     self?.presentVoiceControlOverlay(title: proj.displayName, subtitle: proj.category)
