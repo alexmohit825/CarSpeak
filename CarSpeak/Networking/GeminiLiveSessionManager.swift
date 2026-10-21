@@ -72,27 +72,42 @@ final class GeminiLiveSessionManager: NSObject, ObservableObject {
 
     // MARK: - Start / Stop Full-Duplex CarPlay Voice Session
 
-    func restartOrStartHandsFreeSession() {
-        if isLiveSessionActive {
-            audioEngine.ensureEngineRunning()
-            if isSetupComplete && webSocketTask != nil {
-                injectContextMessageIntoLiveSession(
+    /// Synchronously claims the audio session during `AudioStartingIntent.perform()` or CarPlay scene activation,
+    /// then re-asserts the cabin audio route and triggers the greeting once Siri's audio ducking releases.
+    func startOrResumeFromSiriOrCarPlay(switchTopic: String? = nil) {
+        // 1. Synchronously claim AVAudioSession and start AVAudioEngine so iOS AudioStartingIntent grants background audio ownership
+        if !isLiveSessionActive {
+            startHandsFreeSession()
+        } else {
+            audioEngine.rebindTapIfHardwareRateChangedAndEnsureRunning()
+        }
+
+        // 2. When Siri finishes speaking its brief dialog (~1.4s later), re-assert the CarPlay audio route and speak/switch
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) { [weak self] in
+            guard let self = self else { return }
+            self.audioEngine.rebindTapIfHardwareRateChangedAndEnsureRunning()
+
+            if let topic = switchTopic, !topic.isEmpty {
+                Task { @MainActor in
+                    if let switched = await ConversationVaultClient.shared.switchConversation(queryOrId: topic) {
+                        SteeringWheelController.shared.updateNowPlayingDashboard()
+                        await self.sendVoiceOrTextCommand("We switched to \(switched.title). Briefly summarize where we left off.")
+                    } else {
+                        await self.sendVoiceOrTextCommand("Switch to our conversation on \(topic)")
+                    }
+                }
+            } else if self.isSetupComplete && self.webSocketTask != nil && !self.audioEngine.isAISpeakingOrInTail {
+                self.injectContextMessageIntoLiveSession(
                     role: "user",
                     text: "Say 'CarSpeak ready. What would you like to discuss?' in one short sentence.",
                     turnComplete: true
                 )
-                return
             }
-            webSocketTask?.cancel(with: .goingAway, reason: nil)
-            webSocketTask = nil
-            isSetupComplete = false
-            shouldSendGreetingOnSetup = true
-            Task {
-                await connectLiveWebSocket(isResuming: false)
-            }
-            return
         }
-        startHandsFreeSession()
+    }
+
+    func restartOrStartHandsFreeSession() {
+        startOrResumeFromSiriOrCarPlay(switchTopic: nil)
     }
 
     func startHandsFreeSession(forceRestartAudio: Bool = false) {

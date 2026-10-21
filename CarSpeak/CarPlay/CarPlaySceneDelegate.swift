@@ -16,16 +16,24 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
     ) {
         self.interfaceController = interfaceController
         SteeringWheelController.shared.configureRemoteCommands()
-        GeminiLiveSessionManager.shared.startHandsFreeSession()
+        GeminiLiveSessionManager.shared.startOrResumeFromSiriOrCarPlay()
 
         let rootTemplate = buildCarPlayRootTemplate()
         interfaceController.setRootTemplate(rootTemplate, animated: true, completion: nil)
 
-        // Automatically refresh CarPlay list when projects or conversations update
+        // Present native CarPlay Voice Control screen immediately so the car screen matches a voice co-pilot
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+            self?.presentVoiceControlOverlay(
+                title: ConversationVaultClient.shared.activeConversation?.title ?? "CarSpeak • Listening Now",
+                subtitle: "Speak Anytime • Tap Back for 56 Projects & Threads"
+            )
+        }
+
+        // Automatically refresh CarPlay list when projects, conversations, or live transcript update
         ConversationVaultClient.shared.$conversations
-            .combineLatest(ConversationVaultClient.shared.$agProjects)
+            .combineLatest(ConversationVaultClient.shared.$agProjects, GeminiLiveSessionManager.shared.$liveModelTranscript)
             .debounce(for: .milliseconds(350), scheduler: RunLoop.main)
-            .sink { [weak self] _, _ in
+            .sink { [weak self] _, _, _ in
                 guard let self = self, let ic = self.interfaceController else { return }
                 let updatedRoot = self.buildCarPlayRootTemplate()
                 ic.setRootTemplate(updatedRoot, animated: false, completion: nil)
@@ -34,14 +42,10 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
     }
 
     func sceneDidBecomeActive(_ scene: UIScene) {
-        // Whenever Dr. Mohit taps the CarSpeak icon on the CarPlay dashboard, ensure the audio engine
-        // and Gemini 3.8 Live session are awake and ready without needing Siri.
+        // Whenever Dr. Mohit opens CarSpeak on CarPlay (via Siri or dashboard tap), ensure the audio engine
+        // and Gemini 3.8 Live session claim the cabin audio route and greet cleanly.
         SteeringWheelController.shared.configureRemoteCommands()
-        if !GeminiLiveSessionManager.shared.isLiveSessionActive {
-            GeminiLiveSessionManager.shared.startHandsFreeSession()
-        } else {
-            GeminiLiveSessionManager.shared.audioEngine.ensureEngineRunning()
-        }
+        GeminiLiveSessionManager.shared.startOrResumeFromSiriOrCarPlay()
     }
 
     func templateApplicationScene(
@@ -59,20 +63,26 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
         var sections: [CPListSection] = []
 
         // 1. Live Voice Co-Pilot Control Section (Always Available at Top)
+        let activeSubtitle: String = {
+            if !manager.liveModelTranscript.isEmpty {
+                return manager.liveModelTranscript
+            }
+            return "Listening on CarPlay • Speak anytime or tap to greet"
+        }()
         let liveVoiceItem = CPListItem(
-            text: manager.isLiveSessionActive ? "🎙️ Tap to Speak / Reconnect Voice Session" : "🎙️ Start Hands-Free Voice Conversation",
-            detailText: "5G Multipath • Speak anytime or say 'Switch to project...'",
+            text: manager.isLiveSessionActive ? "🟢 CarSpeak Live • Listening Now" : "🎙️ Tap to Start CarSpeak Voice",
+            detailText: activeSubtitle,
             image: UIImage(systemName: "waveform.circle.fill")
         )
         liveVoiceItem.handler = { [weak self] _, completion in
-            manager.restartOrStartHandsFreeSession()
+            manager.startOrResumeFromSiriOrCarPlay()
             self?.presentVoiceControlOverlay(
                 title: vault.activeConversation?.title ?? "CarSpeak Hands-Free AI",
-                subtitle: "Listening • 5G Live Stream"
+                subtitle: "Listening • Speak Anytime"
             )
             completion()
         }
-        sections.append(CPListSection(items: [liveVoiceItem], header: "Hands-Free Voice Control", sectionIndexTitle: nil))
+        sections.append(CPListSection(items: [liveVoiceItem], header: "CarSpeak • \(manager.currentPersona.displayName)", sectionIndexTitle: nil))
 
         // 2. Saved Conversations Section (Only shown when non-empty)
         if !vault.conversations.isEmpty {
@@ -126,6 +136,10 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
 
     private func presentVoiceControlOverlay(title: String, subtitle: String) {
         guard let ic = interfaceController else { return }
+        // Avoid stacking duplicate CPVoiceControlTemplate instances if one is already presented
+        if ic.presentedTemplate is CPVoiceControlTemplate {
+            return
+        }
         let state = CPVoiceControlState(
             identifier: "carspeak-active",
             titleVariants: [title, subtitle],

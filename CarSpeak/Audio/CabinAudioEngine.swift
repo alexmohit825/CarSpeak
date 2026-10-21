@@ -61,6 +61,12 @@ final class CabinAudioEngine: NSObject, ObservableObject {
             name: AVAudioSession.interruptionNotification,
             object: AVAudioSession.sharedInstance()
         )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleAudioRouteChange(_:)),
+            name: AVAudioSession.routeChangeNotification,
+            object: AVAudioSession.sharedInstance()
+        )
     }
 
     @objc private func handleAudioInterruption(_ notification: Notification) {
@@ -69,10 +75,27 @@ final class CabinAudioEngine: NSObject, ObservableObject {
               let type = AVAudioSession.InterruptionType(rawValue: typeValue) else { return }
 
         if type == .ended, shouldBeCapturing {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
-                self?.ensureEngineRunning()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+                self?.rebindTapIfHardwareRateChangedAndEnsureRunning()
             }
         }
+    }
+
+    @objc private func handleAudioRouteChange(_ notification: Notification) {
+        guard shouldBeCapturing else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+            self?.rebindTapIfHardwareRateChangedAndEnsureRunning()
+        }
+    }
+
+    /// When Siri dismisses on CarPlay or CarPlay switches between Siri HFP and Cabin Audio,
+    /// the hardware inputNode sample rate changes (e.g. 24kHz <-> 48kHz). Re-install the tap cleanly.
+    func rebindTapIfHardwareRateChangedAndEnsureRunning() {
+        if hasInstalledTap {
+            audioEngine.inputNode.removeTap(onBus: 0)
+            hasInstalledTap = false
+        }
+        ensureEngineRunning()
     }
 
     func configureCarPlayAudioSession() {
@@ -104,10 +127,22 @@ final class CabinAudioEngine: NSObject, ObservableObject {
     func startCabinDuplexStream() {
         shouldBeCapturing = true
 
+        // Synchronously configure & start AVAudioEngine playback immediately so iOS AudioStartingIntent
+        // and CarPlay grant background audio ownership during perform() before permission callback returns.
+        configureCarPlayAudioSession()
+        if !audioEngine.attachedNodes.contains(playerNode) {
+            audioEngine.attach(playerNode)
+            audioEngine.connect(playerNode, to: audioEngine.mainMixerNode, format: playbackFormat)
+        }
+        if !audioEngine.isRunning {
+            try? audioEngine.start()
+            playerNode.play()
+        }
+
         AVAudioSession.sharedInstance().requestRecordPermission { [weak self] granted in
             guard let self = self, granted else { return }
             DispatchQueue.main.async {
-                self.ensureEngineRunning()
+                self.rebindTapIfHardwareRateChangedAndEnsureRunning()
             }
         }
     }

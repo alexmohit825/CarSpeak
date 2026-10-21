@@ -5,18 +5,13 @@ import AppIntents
 struct StartCarSpeakIntent: AudioStartingIntent {
     static var title: LocalizedStringResource = "Start CarSpeak Hands-Free Session"
     static var description = IntentDescription("Launches CarSpeak directly into hands-free cabin audio mode.")
-    /// CRITICAL FOR CARPLAY: Must be false so Siri does not attempt to foreground the locked device UIWindowScene
-    /// (which times out after ~7 seconds while driving and causes Siri to say "Something went wrong. Please try again").
     static var openAppWhenRun: Bool = false
 
     @MainActor
-    func perform() async throws -> some IntentResult {
+    func perform() async throws -> some IntentResult & ProvidesDialog {
         SteeringWheelController.shared.configureRemoteCommands()
-        // Allow Siri's audio session to dismiss cleanly (350ms), then immediately start CarSpeak cabin audio
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-            GeminiLiveSessionManager.shared.restartOrStartHandsFreeSession()
-        }
-        return .result()
+        GeminiLiveSessionManager.shared.startOrResumeFromSiriOrCarPlay()
+        return .result(dialog: "CarSpeak listening.")
     }
 }
 
@@ -30,25 +25,11 @@ struct SwitchCarSpeakConversationIntent: AudioStartingIntent {
     var topic: String
 
     @MainActor
-    func perform() async throws -> some IntentResult {
+    func perform() async throws -> some IntentResult & ProvidesDialog {
         SteeringWheelController.shared.configureRemoteCommands()
         let targetTopic = topic
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-            Task { @MainActor in
-                if !GeminiLiveSessionManager.shared.isLiveSessionActive {
-                    GeminiLiveSessionManager.shared.restartOrStartHandsFreeSession()
-                } else {
-                    GeminiLiveSessionManager.shared.audioEngine.ensureEngineRunning()
-                }
-                if let switched = await ConversationVaultClient.shared.switchConversation(queryOrId: targetTopic) {
-                    SteeringWheelController.shared.updateNowPlayingDashboard()
-                    await GeminiLiveSessionManager.shared.sendVoiceOrTextCommand("We switched to \(switched.title). Briefly summarize where we left off.")
-                } else {
-                    await GeminiLiveSessionManager.shared.sendVoiceOrTextCommand("Switch to our conversation on \(targetTopic)")
-                }
-            }
-        }
-        return .result()
+        GeminiLiveSessionManager.shared.startOrResumeFromSiriOrCarPlay(switchTopic: targetTopic)
+        return .result(dialog: "Switching CarSpeak.")
     }
 }
 
