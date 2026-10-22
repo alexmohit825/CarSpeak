@@ -1,4 +1,4 @@
-name: CarSpeak PC-to-TestFlight Pipeline
+name: CarSpeak Ad-Hoc Direct IPA Pipeline
 
 on:
   push:
@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       bundle_id:
-        description: 'Target Bundle ID for TestFlight Delivery'
+        description: 'Target Bundle ID for Ad-Hoc Delivery'
         required: false
         default: 'com.AlexMohit.CarSpeak'
 
@@ -18,8 +18,8 @@ permissions:
   contents: write
 
 jobs:
-  build-and-deliver:
-    name: 🍏 Compile, Package & Deliver CarSpeak to TestFlight
+  build-and-export:
+    name: 🍏 Compile, Sign & Export CarSpeak Ad-Hoc IPA
     runs-on: macos-15
     timeout-minutes: 30
 
@@ -54,7 +54,7 @@ jobs:
           echo "$APP_STORE_CONNECT_PRIVATE_KEY" > ~/.appstoreconnect/private_keys/AuthKey_38F6WA87DU.p8
           chmod 600 ~/.appstoreconnect/private_keys/AuthKey_38F6WA87DU.p8
 
-      - name: 🚀 Compile, Embed CarPlay Entitlements & Export to TestFlight
+      - name: 🚀 Compile, Embed CarPlay Entitlements & Export Ad-Hoc IPA
         run: |
           mkdir -p build/archive build/output
           xcodebuild archive \
@@ -91,11 +91,19 @@ jobs:
 
           xcodebuild -exportArchive \
             -archivePath build/archive/CarSpeak.xcarchive \
-            -exportOptionsPlist ExportOptions.plist \
+            -exportOptionsPlist ExportOptions-AdHoc.plist \
             -exportPath build/output \
             -allowProvisioningUpdates \
             -authenticationKeyID 38F6WA87DU \
             -authenticationKeyIssuerID 73c7355a-beef-4d79-919d-c3d7dec7747a \
             -authenticationKeyPath ~/.appstoreconnect/private_keys/AuthKey_38F6WA87DU.p8
 
-          echo "✅ Exported and uploaded with full CarPlay Managed Entitlements (com.apple.developer.carplay-audio + com.apple.developer.carplay-voice-based-conversation)!"
+          ls -la build/output
+          echo "✅ Exported CarSpeak.ipa with CarPlay Managed Entitlements successfully!"
+
+      - name: 📦 Upload CarSpeak Ad-Hoc IPA Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CarSpeak-AdHoc-IPA
+          path: build/output/CarSpeak.ipa
+          retention-days: 14
