@@ -462,6 +462,79 @@ final class GeminiLiveSessionManager: NSObject, ObservableObject {
         }
     }
 
+    // MARK: - Siri Voice Relay (100% Native CarPlay Siri Mic & Siri Voice)
+
+    /// Executes a fast, zero-AVAudioEngine consultation against the Cloudflare Worker (`/api/chat`)
+    /// with full context of all 56 Antigravity projects and archived threads, returning the plain text
+    /// so Siri speaks it out loud using Apple's native CarPlay Siri voice.
+    @MainActor
+    func askSiriRelayQuestion(_ query: String) async -> String {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return "I didn't catch that. Which Antigravity project would you like to discuss?"
+        }
+
+        liveUserTranscript = trimmed
+        connectionStatusText = "Consulting AG Portfolio..."
+
+        // Check if the user asked to switch to a specific Antigravity project by name
+        let lower = trimmed.lowercased()
+        if let matchedProj = vault.agProjects.first(where: { lower.contains($0.displayName.lowercased()) || lower.contains($0.id.lowercased()) }) {
+            let prompt = "Dr. Mohit is asking about his Antigravity project '\(matchedProj.displayName)' (Category: \(matchedProj.category), Focus: \(matchedProj.recentFocus), Tech: \(matchedProj.techStack)). Answer concisely in 2 to 3 spoken sentences suitable for Siri in the car: \(trimmed)"
+            return await fetchCloudflareChatReply(prompt)
+        }
+
+        return await fetchCloudflareChatReply(trimmed)
+    }
+
+    @MainActor
+    private func fetchCloudflareChatReply(_ message: String) async -> String {
+        guard let url = URL(string: "\(vault.baseURL)/api/chat") else {
+            return "CarSpeak cloud endpoint is unavailable."
+        }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.timeoutInterval = 12.0
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let body: [String: String] = [
+            "message": message,
+            "persona": currentPersona.rawValue,
+            "conversationId": vault.activeConversation?.id ?? ""
+        ]
+        req.httpBody = try? JSONSerialization.data(withJSONObject: body)
+
+        do {
+            let (data, _) = try await URLSession.shared.data(for: req)
+            struct ChatResp: Decodable {
+                let reply: String?
+                let activeConversation: ConversationThread?
+            }
+            let decoded = try JSONDecoder().decode(ChatResp.self, from: data)
+            if let updatedConv = decoded.activeConversation {
+                vault.activeConversation = updatedConv
+                if let idx = vault.conversations.firstIndex(where: { $0.id == updatedConv.id }) {
+                    vault.conversations[idx] = updatedConv
+                } else {
+                    vault.conversations.insert(updatedConv, at: 0)
+                }
+            }
+            if let reply = decoded.reply, !reply.isEmpty {
+                liveModelTranscript = reply
+                connectionStatusText = vault.activeConversation?.title ?? "CarSpeak Active"
+                return reply
+            }
+        } catch {
+            print("[GeminiLiveSessionManager] Siri relay fallback: \(error.localizedDescription)")
+        }
+
+        // Offline local fallback using bundled 56 Antigravity projects seed
+        let lower = message.lowercased()
+        if let matched = vault.agProjects.first(where: { lower.contains($0.displayName.lowercased()) }) {
+            return "\(matched.displayName) is your \(matched.category) project focused on \(matched.recentFocus), built with \(matched.techStack)."
+        }
+        return "CarSpeak is ready with your \(vault.agProjects.count) Antigravity projects. Name any project like Spine-Measure, Orator, or VigilOR to review its status."
+    }
+
     // MARK: - Direct Voice/Text Command Execution (Siri Intent / CarPlay List / Fallback)
 
     @MainActor

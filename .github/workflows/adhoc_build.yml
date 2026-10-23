@@ -54,7 +54,7 @@ jobs:
           echo "$APP_STORE_CONNECT_PRIVATE_KEY" > ~/.appstoreconnect/private_keys/AuthKey_38F6WA87DU.p8
           chmod 600 ~/.appstoreconnect/private_keys/AuthKey_38F6WA87DU.p8
 
-      - name: 🚀 Compile, Embed CarPlay Entitlements & Export Ad-Hoc IPA
+      - name: 🚀 Compile & Export Ad-Hoc IPA (iPhone + Siri Voice Relay)
         run: |
           mkdir -p build/archive build/output
           xcodebuild archive \
@@ -67,7 +67,6 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO
 
-          echo "🔐 Embedding CarSpeak.entitlements (CarPlay Audio + CarPlay Voice Based Conversation) into Archive Binary..."
           cat > build/archive_entitlements.plist << 'EOF'
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -77,10 +76,6 @@ jobs:
               <string>523MJL63MC.com.AlexMohit.CarSpeak</string>
               <key>com.apple.developer.team-identifier</key>
               <string>523MJL63MC</string>
-              <key>com.apple.developer.carplay-audio</key>
-              <true/>
-              <key>com.apple.developer.carplay-voice-based-conversation</key>
-              <true/>
           </dict>
           </plist>
           EOF
@@ -99,7 +94,7 @@ jobs:
             -authenticationKeyPath ~/.appstoreconnect/private_keys/AuthKey_38F6WA87DU.p8
 
           ls -la build/output
-          echo "✅ Exported CarSpeak.ipa with CarPlay Managed Entitlements successfully!"
+          echo "✅ Exported CarSpeak.ipa Ad-Hoc build successfully!"
 
       - name: 📦 Upload CarSpeak Ad-Hoc IPA Artifact
         uses: actions/upload-artifact@v4

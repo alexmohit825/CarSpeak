@@ -61,12 +61,6 @@ final class CabinAudioEngine: NSObject, ObservableObject {
             name: AVAudioSession.interruptionNotification,
             object: AVAudioSession.sharedInstance()
         )
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(handleAudioRouteChange(_:)),
-            name: AVAudioSession.routeChangeNotification,
-            object: AVAudioSession.sharedInstance()
-        )
     }
 
     @objc private func handleAudioInterruption(_ notification: Notification) {
@@ -75,21 +69,13 @@ final class CabinAudioEngine: NSObject, ObservableObject {
               let type = AVAudioSession.InterruptionType(rawValue: typeValue) else { return }
 
         if type == .ended, shouldBeCapturing {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
                 self?.rebindTapIfHardwareRateChangedAndEnsureRunning()
             }
         }
     }
 
-    @objc private func handleAudioRouteChange(_ notification: Notification) {
-        guard shouldBeCapturing else { return }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
-            self?.rebindTapIfHardwareRateChangedAndEnsureRunning()
-        }
-    }
-
-    /// When Siri dismisses on CarPlay or CarPlay switches between Siri HFP and Cabin Audio,
-    /// the hardware inputNode sample rate changes (e.g. 24kHz <-> 48kHz). Re-install the tap cleanly.
+    /// Re-installs the inputNode tap cleanly after an interruption ends.
     func rebindTapIfHardwareRateChangedAndEnsureRunning() {
         if hasInstalledTap {
             audioEngine.inputNode.removeTap(onBus: 0)
@@ -108,7 +94,12 @@ final class CabinAudioEngine: NSObject, ObservableObject {
                 port.portType == .bluetoothLE
             }
 
-            var options: AVAudioSession.CategoryOptions = [.allowBluetooth, .allowBluetoothA2DP, .duckOthers]
+            var options: AVAudioSession.CategoryOptions = [
+                .allowBluetooth,
+                .allowBluetoothA2DP,
+                .mixWithOthers,
+                .duckOthers
+            ]
             if !hasExternalCarOrBT {
                 options.insert(.defaultToSpeaker)
             }
@@ -118,6 +109,12 @@ final class CabinAudioEngine: NSObject, ObservableObject {
                 mode: .default,
                 options: options
             )
+            // When running on the iPhone directly inside the car (while CarPlay is connected for music/maps),
+            // explicitly prefer the iPhone's built-in microphone so the user can talk directly to the iPhone
+            // without CarPlay's closed head-unit microphone bus blocking capture.
+            if let builtInMic = session.availableInputs?.first(where: { $0.portType == .builtInMic }) {
+                try? session.setPreferredInput(builtInMic)
+            }
             try session.setActive(true, options: .notifyOthersOnDeactivation)
         } catch {
             print("[CabinAudioEngine] AudioSession configuration warning: \(error.localizedDescription)")

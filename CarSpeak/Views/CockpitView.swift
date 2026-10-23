@@ -35,6 +35,11 @@ struct CockpitView: View {
             }
             .navigationTitle("CarSpeak")
             .navigationBarTitleDisplayMode(.inline)
+            .onAppear {
+                if !session.isLiveSessionActive {
+                    session.startHandsFreeSession()
+                }
+            }
         }
     }
 
