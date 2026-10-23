@@ -332,8 +332,10 @@ export default {
     }
 
     try {
-      // 0. 1-Tap Wireless Ad-Hoc OTA Installation Endpoints (/install, /manifest.plist)
-      if (url.pathname === '/manifest.plist') {
+      // 0. 1-Tap Wireless Ad-Hoc OTA Installation Endpoints (/install, /manifest.plist, /CarSpeak.ipa)
+      const normPath = url.pathname.replace(/\/+$/, '').toLowerCase() || '/';
+
+      if (normPath === '/manifest.plist') {
         const origin = url.origin;
         const plist = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -376,15 +378,17 @@ export default {
         });
       }
 
-      if (url.pathname === '/CarSpeak.ipa' && env.ASSETS) {
-        const assetResp = await env.ASSETS.fetch(request);
+      if (normPath === '/carspeak.ipa' && env.ASSETS) {
+        const ipaReq = new Request(new URL('/CarSpeak.ipa', url.origin), request);
+        const assetResp = await env.ASSETS.fetch(ipaReq);
         const headers = new Headers(assetResp.headers);
         headers.set('Content-Type', 'application/octet-stream');
+        headers.set('Content-Disposition', 'attachment; filename="CarSpeak.ipa"');
         headers.set('Cache-Control', 'no-store');
         return new Response(assetResp.body, { status: assetResp.status, headers });
       }
 
-      if (url.pathname === '/install') {
+      if (normPath === '/install' || normPath === '/ota' || normPath === '/adhoc') {
         const origin = url.origin;
         const itmsUrl = `itms-services://?action=download-manifest&url=${encodeURIComponent(`${origin}/manifest.plist`)}`;
         const html = `<!DOCTYPE html>
