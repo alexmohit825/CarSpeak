@@ -332,6 +332,153 @@ export default {
     }
 
     try {
+      // 0. 1-Tap Wireless Ad-Hoc OTA Installation Endpoints (/install, /manifest.plist)
+      if (url.pathname === '/manifest.plist') {
+        const origin = url.origin;
+        const plist = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>items</key>
+    <array>
+        <dict>
+            <key>assets</key>
+            <array>
+                <dict>
+                    <key>kind</key>
+                    <string>software-package</string>
+                    <key>url</key>
+                    <string>${origin}/CarSpeak.ipa</string>
+                </dict>
+            </array>
+            <key>metadata</key>
+            <dict>
+                <key>bundle-identifier</key>
+                <string>com.AlexMohit.CarSpeak</string>
+                <key>bundle-version</key>
+                <string>1.0.0</string>
+                <key>kind</key>
+                <string>software</string>
+                <key>title</key>
+                <string>CarSpeak</string>
+            </dict>
+        </dict>
+    </array>
+</dict>
+</plist>`;
+        return new Response(plist, {
+          status: 200,
+          headers: {
+            ...CORS_HEADERS,
+            'Content-Type': 'application/xml; charset=utf-8',
+            'Cache-Control': 'no-store'
+          }
+        });
+      }
+
+      if (url.pathname === '/CarSpeak.ipa' && env.ASSETS) {
+        const assetResp = await env.ASSETS.fetch(request);
+        const headers = new Headers(assetResp.headers);
+        headers.set('Content-Type', 'application/octet-stream');
+        headers.set('Cache-Control', 'no-store');
+        return new Response(assetResp.body, { status: assetResp.status, headers });
+      }
+
+      if (url.pathname === '/install') {
+        const origin = url.origin;
+        const itmsUrl = `itms-services://?action=download-manifest&url=${encodeURIComponent(`${origin}/manifest.plist`)}`;
+        const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+  <title>Install CarSpeak (Ad-Hoc Direct)</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", sans-serif;
+      background: linear-gradient(145deg, #f5f8ff 0%, #eef4ff 50%, #fff7f0 100%);
+      color: #121826;
+      margin: 0;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+      box-sizing: border-box;
+    }
+    .card {
+      background: #ffffff;
+      border-radius: 26px;
+      padding: 32px 24px;
+      max-width: 420px;
+      width: 100%;
+      box-shadow: 0 18px 40px rgba(18, 24, 38, 0.08);
+      text-align: center;
+    }
+    .badge {
+      display: inline-block;
+      background: #d1fae5;
+      color: #065f46;
+      font-size: 12px;
+      font-weight: 700;
+      padding: 6px 14px;
+      border-radius: 999px;
+      margin-bottom: 16px;
+    }
+    h1 {
+      font-size: 28px;
+      margin: 0 0 8px 0;
+    }
+    p {
+      color: #4b5563;
+      font-size: 15px;
+      line-height: 1.5;
+      margin: 0 0 24px 0;
+    }
+    .btn {
+      display: block;
+      background: linear-gradient(135deg, #4f46e5 0%, #0ea5e9 100%);
+      color: #ffffff;
+      text-decoration: none;
+      font-size: 18px;
+      font-weight: 700;
+      padding: 18px 24px;
+      border-radius: 16px;
+      box-shadow: 0 10px 24px rgba(14, 165, 233, 0.35);
+      margin-bottom: 14px;
+    }
+    .meta {
+      font-size: 12px;
+      color: #6b7280;
+      margin-top: 16px;
+      line-height: 1.6;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="badge">AD-HOC DIRECT • ZERO ASC</div>
+    <h1>CarSpeak</h1>
+    <p>Siri Voice Relay on CarPlay + Auto-Start iPhone Voice Consultation for all 56 Antigravity Projects.</p>
+    <a class="btn" href="${itmsUrl}">📲 Tap to Install on iPhone</a>
+    <div class="meta">
+      Signed for <strong>Alex's iPhone</strong><br/>
+      UDID: <code>00008150-001E7C892200401C</code><br/>
+      Open this page in <strong>Safari</strong> on your iPhone and tap the button above.
+    </div>
+  </div>
+</body>
+</html>`;
+        return new Response(html, {
+          status: 200,
+          headers: {
+            ...CORS_HEADERS,
+            'Content-Type': 'text/html; charset=utf-8',
+            'Cache-Control': 'no-store'
+          }
+        });
+      }
+
       // 1. Health & Pre-Flight Endpoint
       if (url.pathname === '/api/health') {
         const projects = await getProjects(env);
