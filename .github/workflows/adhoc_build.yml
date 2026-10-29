@@ -76,6 +76,10 @@ jobs:
               <string>523MJL63MC.com.AlexMohit.CarSpeak</string>
               <key>com.apple.developer.team-identifier</key>
               <string>523MJL63MC</string>
+              <key>com.apple.developer.carplay-audio</key>
+              <true/>
+              <key>com.apple.developer.carplay-voice-based-conversation</key>
+              <true/>
           </dict>
           </plist>
           EOF

@@ -242,6 +242,20 @@ struct CockpitView: View {
                         .foregroundStyle(Color(red: 0.22, green: 0.19, blue: 0.64))
                 }
             }
+
+            Button {
+                audio.toggleMicInputSource()
+            } label: {
+                Label(
+                    audio.useCarBluetoothMic ? "Mic: Car Bluetooth (Tap for iPhone Mic)" : "Mic: iPhone High-Gain (Keeps Music Playing)",
+                    systemImage: audio.useCarBluetoothMic ? "car.fill" : "iphone"
+                )
+                .font(.caption2.weight(.bold))
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
+                .background(Color(red: 0.93, green: 0.98, blue: 0.95), in: Capsule())
+                .foregroundStyle(Color(red: 0.04, green: 0.45, blue: 0.32))
+            }
         }
         .padding(.vertical, 28)
         .padding(.horizontal, 18)
