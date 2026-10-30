@@ -54,7 +54,7 @@ jobs:
           echo "$APP_STORE_CONNECT_PRIVATE_KEY" > ~/.appstoreconnect/private_keys/AuthKey_38F6WA87DU.p8
           chmod 600 ~/.appstoreconnect/private_keys/AuthKey_38F6WA87DU.p8
 
-      - name: 🚀 Compile & Export Ad-Hoc IPA (iPhone + Siri Voice Relay)
+      - name: 🚀 Compile & Export Ad-Hoc IPA (CarPlay Audio + Continuous Loop)
         run: |
           mkdir -p build/archive build/output
           xcodebuild archive \
@@ -78,8 +78,6 @@ jobs:
               <string>523MJL63MC</string>
               <key>com.apple.developer.carplay-audio</key>
               <true/>
-              <key>com.apple.developer.carplay-voice-based-conversation</key>
-              <true/>
           </dict>
           </plist>
           EOF
@@ -87,6 +85,8 @@ jobs:
           codesign --force --sign - --entitlements build/archive_entitlements.plist build/archive/CarSpeak.xcarchive/Products/Applications/CarSpeak.app
           echo "🔎 Verifying Embedded Archive Entitlements:"
           codesign -d --entitlements :- build/archive/CarSpeak.xcarchive/Products/Applications/CarSpeak.app
+          echo "🔎 Verifying CarPlay Scene Manifest in Info.plist:"
+          plutil -p build/archive/CarSpeak.xcarchive/Products/Applications/CarSpeak.app/Info.plist | grep -A 12 "UIApplicationSceneManifest"
 
           xcodebuild -exportArchive \
             -archivePath build/archive/CarSpeak.xcarchive \

@@ -2,18 +2,21 @@ import Foundation
 import AVFoundation
 import Speech
 import UIKit
+import CryptoKit
 
-/// MS Copilot-Style Continuous Turn-by-Turn Cabin Audio & Speech Engine.
+/// MS Copilot-Style Continuous Turn-by-Turn Cabin Audio & Speech Engine (CarPlay + iPhone).
 ///
-/// Why this works 100% smoothly on both CarPlay and iPhone without dropouts, echoes, or Siri timeouts:
-/// 1. Strict State Separation (Never Listens & Speaks Simultaneously):
-///    - State A (`Listening`): Uses `SFSpeechRecognizer` + `AVAudioEngine` with a 1.5-second silence detector.
-///      Zero bytes are sent over 5G while Dr. Mohit is speaking.
-///    - State B (`Speaking`): Completely stops the microphone tap (`stopListening()`), renders the AI reply to
-///      a high-gain `.caf` file on disk (`AVSpeechSynthesizer.write`), and plays it via `AVAudioPlayer`
-///      (the exact same rock-solid audio path as Apple Music and `Hands-Free Lingo`).
-///    - State C (`Auto-Resume`): The instant `AVAudioPlayer` finishes speaking (`audioPlayerDidFinishPlaying`),
-///      it automatically plays a subtle ready chime and re-opens `startListeningWindow()` for the entire drive!
+/// Engineered specifically to match the proven `Hands-Free Lingo` CarPlay audio pipeline:
+/// 1. Speaking State (`State B`):
+///    - Always stops the microphone tap FIRST, clears `setPreferredInput(nil)`, and sets
+///      `AVAudioSession` to `.playback` (`mode: .spokenAudio`, `options: [.allowBluetoothA2DP, .allowAirPlay, .duckOthers]`)
+///      BEFORE rendering and playing the `.caf` file via `AVAudioPlayer`.
+///    - Never calls `setActive(false)` between turns, so CarPlay holds the `.carAudio` stereo route continuously.
+/// 2. Listening State (`State A`):
+///    - Triggered ONLY after `audioPlayerDidFinishPlaying` completes.
+///    - Creates a fresh `AVAudioEngine` instance so CarPlay route transitions never leave a stale sample rate on `inputNode`.
+///    - The moment the user pauses for 1.55s (`commitSpokenTurn`), immediately stops `AVAudioEngine` and switches
+///      `AVAudioSession` back to `.playback` so the upcoming AI response plays through the CarPlay stereo speakers.
 final class CabinAudioEngine: NSObject, ObservableObject, AVAudioPlayerDelegate, AVSpeechSynthesizerDelegate {
     @Published var isCapturing: Bool = false
     @Published var isMuted: Bool = false
@@ -22,16 +25,16 @@ final class CabinAudioEngine: NSObject, ObservableObject, AVAudioPlayerDelegate,
     @Published var partialTranscript: String = ""
     @Published var useCarBluetoothMic: Bool = false
 
-    /// Called automatically when the user finishes speaking a sentence (after 1.5s of silence).
+    /// Called automatically when the user finishes speaking a sentence (after 1.55s of silence).
     var onSpokenSentenceCompleted: ((String) -> Void)?
 
-    /// Kept for compatibility if any legacy caller references it
+    /// Kept for compatibility if any caller references it
     var onPCM16ChunkCaptured: ((Data) -> Void)?
 
     private let speechRecognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
     private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
     private var recognitionTask: SFSpeechRecognitionTask?
-    private let audioEngine = AVAudioEngine()
+    private var audioEngine: AVAudioEngine?
 
     private var audioPlayer: AVAudioPlayer?
     private let fallbackSynth = AVSpeechSynthesizer()
@@ -41,7 +44,7 @@ final class CabinAudioEngine: NSObject, ObservableObject, AVAudioPlayerDelegate,
     private let silenceThresholdSeconds: TimeInterval = 1.55
     private var latestRecognizedText: String = ""
     private var shouldKeepLoopAlive: Bool = false
-    private let renderQueue = DispatchQueue(label: "com.AlexMohit.CarSpeak.renderQueue", qos: .userInitiated)
+    private let renderQueue = DispatchQueue(label: "com.AlexMohit.CarSpeak.AudioCache.render", qos: .userInitiated)
 
     var isAISpeakingOrInTail: Bool {
         return isPlayingOutput || (audioPlayer?.isPlaying == true) || fallbackSynth.isSpeaking
@@ -50,11 +53,12 @@ final class CabinAudioEngine: NSObject, ObservableObject, AVAudioPlayerDelegate,
     override init() {
         super.init()
         fallbackSynth.delegate = self
+        _ = try? Self.ensureCacheDirectory()
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(handleAudioInterruption(_:)),
             name: AVAudioSession.interruptionNotification,
-            object: AVAudioSession.sharedInstance()
+            object: nil
         )
     }
 
@@ -65,31 +69,58 @@ final class CabinAudioEngine: NSObject, ObservableObject, AVAudioPlayerDelegate,
 
         if type == .began {
             audioPlayer?.pause()
-            stopListening()
+            stopListening(switchToPlaybackSession: false)
         } else if type == .ended, shouldKeepLoopAlive {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
                 guard let self = self, self.shouldKeepLoopAlive else { return }
-                if let player = self.audioPlayer, !player.isPlaying {
-                    try? AVAudioSession.sharedInstance().setActive(true)
+                if let player = self.audioPlayer, !player.isPlaying, self.isPlayingOutput {
+                    self.configureCarPlayPlaybackSession()
                     player.play()
-                } else {
+                } else if !self.isPlayingOutput && !self.isMuted {
                     self.startListeningWindow()
                 }
             }
         }
     }
 
-    // MARK: - 1. Start / Stop Continuous Copilot Loop
+    // MARK: - 1. CarPlay-Safe Audio Session Configuration (`Hands-Free Lingo` Proven Path)
 
-    func startCabinDuplexStream() {
+    /// Configures `AVAudioSession` for pure CarPlay stereo `.caf` playback (`State B`).
+    /// Matches `Hands-Free Lingo/VoiceManager.swift` so CarPlay routes 100% of speech to the vehicle speakers.
+    func configureCarPlayPlaybackSession() {
+        let session = AVAudioSession.sharedInstance()
+        try? session.setPreferredInput(nil)
+        do {
+            try session.setCategory(
+                .playback,
+                mode: .spokenAudio,
+                options: [.allowBluetoothA2DP, .allowAirPlay, .duckOthers]
+            )
+            try session.setActive(true, options: [])
+        } catch {
+            // Exact Hands-Free Lingo fallback if .duckOthers is rejected on a specific route
+            try? session.setCategory(
+                .playback,
+                mode: .spokenAudio,
+                options: [.allowBluetoothA2DP, .allowAirPlay]
+            )
+            try? session.setActive(true, options: [])
+        }
+    }
+
+    // MARK: - 2. Start / Stop Continuous Copilot Loop
+
+    /// Arms the continuous turn-by-turn loop and requests permissions if needed.
+    /// Does NOT open the microphone if `openMicImmediately` is false (e.g. when a greeting is about to be spoken first).
+    func startCabinDuplexStream(openMicImmediately: Bool = false) {
         shouldKeepLoopAlive = true
         DispatchQueue.main.async {
             UIApplication.shared.isIdleTimerDisabled = true
         }
 
         requestPermissionsIfNeeded { [weak self] granted in
-            guard let self = self, granted else { return }
-            if !self.isPlayingOutput {
+            guard let self = self else { return }
+            if openMicImmediately && granted && !self.isPlayingOutput && !self.isMuted {
                 self.startListeningWindow()
             }
         }
@@ -99,22 +130,24 @@ final class CabinAudioEngine: NSObject, ObservableObject, AVAudioPlayerDelegate,
         shouldKeepLoopAlive = false
         silenceTimer?.invalidate()
         silenceTimer = nil
-        stopListening()
+        stopListening(switchToPlaybackSession: false)
         audioPlayer?.stop()
         audioPlayer = nil
         if fallbackSynth.isSpeaking {
             fallbackSynth.stopSpeaking(at: .immediate)
         }
+        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
         DispatchQueue.main.async {
             UIApplication.shared.isIdleTimerDisabled = false
             self.isCapturing = false
             self.isPlayingOutput = false
             self.inputLevel = 0.0
+            SteeringWheelController.shared.updateNowPlayingDashboard(isSpeaking: false)
         }
     }
 
     func ensureEngineRunning() {
-        if shouldKeepLoopAlive && !isPlayingOutput && !isCapturing {
+        if shouldKeepLoopAlive && !isPlayingOutput && !isCapturing && !isMuted {
             startListeningWindow()
         }
     }
@@ -125,9 +158,8 @@ final class CabinAudioEngine: NSObject, ObservableObject, AVAudioPlayerDelegate,
 
     func toggleMute() {
         isMuted.toggle()
-        AcousticEarcons.shared.play(isMuted ? .micMuted : .micUnmuted)
         if isMuted {
-            stopListening()
+            stopListening(switchToPlaybackSession: true)
         } else if shouldKeepLoopAlive && !isPlayingOutput {
             startListeningWindow()
         }
@@ -135,13 +167,13 @@ final class CabinAudioEngine: NSObject, ObservableObject, AVAudioPlayerDelegate,
 
     func toggleMicInputSource() {
         useCarBluetoothMic.toggle()
-        if isCapturing {
-            stopListening()
+        if isCapturing && !isPlayingOutput {
+            stopListening(switchToPlaybackSession: false)
             startListeningWindow()
         }
     }
 
-    // MARK: - 2. Permissions
+    // MARK: - 3. Permissions
 
     private func requestPermissionsIfNeeded(completion: @escaping (Bool) -> Void) {
         SFSpeechRecognizer.requestAuthorization { authStatus in
@@ -157,37 +189,44 @@ final class CabinAudioEngine: NSObject, ObservableObject, AVAudioPlayerDelegate,
         }
     }
 
-    // MARK: - 3. State A: Continuous Speech Listening Window (With 1.55s Silence Detector)
+    // MARK: - 4. State A: Continuous Speech Listening Window (With 1.55s Silence Detector)
 
     func startListeningWindow() {
         guard shouldKeepLoopAlive, !isMuted, !isPlayingOutput else { return }
-        stopListening()
+        stopListening(switchToPlaybackSession: false)
 
         let session = AVAudioSession.sharedInstance()
         do {
-            let options: AVAudioSession.CategoryOptions = [
-                .allowBluetooth,
-                .allowBluetoothA2DP,
-                .mixWithOthers,
-                .duckOthers,
-                .defaultToSpeaker
-            ]
-            try session.setCategory(.playAndRecord, mode: useCarBluetoothMic ? .voiceChat : .measurement, options: options)
-
-            // Default to the iPhone's built-in high-gain microphone so CarPlay's locked head-unit mic bus
-            // never deafens the app, unless the user explicitly toggled Car Bluetooth Mic mode.
+            try session.setCategory(
+                .playAndRecord,
+                mode: .default,
+                options: [.allowBluetooth, .allowBluetoothA2DP, .allowAirPlay, .mixWithOthers]
+            )
             if !useCarBluetoothMic,
                let builtInMic = session.availableInputs?.first(where: { $0.portType == .builtInMic }) {
                 try? session.setPreferredInput(builtInMic)
             } else {
                 try? session.setPreferredInput(nil)
             }
-            try session.setActive(true, options: .notifyOthersOnDeactivation)
+            try session.setActive(true, options: [])
         } catch {
-            print("[CabinAudioEngine] Listening session config warning: \(error.localizedDescription)")
+            try? session.setPreferredInput(nil)
+            try? session.setCategory(.playAndRecord, options: [.allowBluetooth, .mixWithOthers])
+            try? session.setActive(true, options: [])
         }
 
+        if !attemptStartAudioEngineTap(session: session) {
+            // Automatic fallback: if preferred input failed on CarPlay, clear preferredInput and retry with default route
+            try? session.setPreferredInput(nil)
+            _ = attemptStartAudioEngineTap(session: session)
+        }
+    }
+
+    private func attemptStartAudioEngineTap(session: AVAudioSession) -> Bool {
         do {
+            let engine = AVAudioEngine()
+            self.audioEngine = engine
+
             let req = SFSpeechAudioBufferRecognitionRequest()
             req.shouldReportPartialResults = true
             if #available(iOS 17.0, *) {
@@ -196,9 +235,11 @@ final class CabinAudioEngine: NSObject, ObservableObject, AVAudioPlayerDelegate,
             self.recognitionRequest = req
             self.latestRecognizedText = ""
 
-            let inputNode = audioEngine.inputNode
+            let inputNode = engine.inputNode
             let recordingFormat = inputNode.outputFormat(forBus: 0)
-            guard recordingFormat.sampleRate > 0 && recordingFormat.channelCount > 0 else { return }
+            guard recordingFormat.sampleRate > 0 && recordingFormat.channelCount > 0 else {
+                return false
+            }
 
             inputNode.removeTap(onBus: 0)
             inputNode.installTap(onBus: 0, bufferSize: 1024, format: recordingFormat) { [weak self] buffer, _ in
@@ -207,8 +248,8 @@ final class CabinAudioEngine: NSObject, ObservableObject, AVAudioPlayerDelegate,
                 self.computeRMS(buffer: buffer)
             }
 
-            audioEngine.prepare()
-            try audioEngine.start()
+            engine.prepare()
+            try engine.start()
 
             DispatchQueue.main.async {
                 self.isCapturing = true
@@ -221,6 +262,7 @@ final class CabinAudioEngine: NSObject, ObservableObject, AVAudioPlayerDelegate,
                     let transcript = result.bestTranscription.formattedString.trimmingCharacters(in: .whitespacesAndNewlines)
                     if !transcript.isEmpty {
                         DispatchQueue.main.async {
+                            guard !self.isPlayingOutput else { return }
                             self.latestRecognizedText = transcript
                             self.partialTranscript = transcript
                             self.resetSilenceCommitTimer()
@@ -230,19 +272,23 @@ final class CabinAudioEngine: NSObject, ObservableObject, AVAudioPlayerDelegate,
 
                 if error != nil {
                     DispatchQueue.main.async {
+                        guard !self.isPlayingOutput else { return }
                         if !self.latestRecognizedText.isEmpty {
                             self.commitSpokenTurn()
                         } else if self.shouldKeepLoopAlive && !self.isPlayingOutput && !self.isMuted {
-                            // Apple's SFSpeechRecognizer resets after ~60s of total silence; seamlessly restart it!
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                            // Seamlessly refresh Apple's 60-second idle recognition window
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+                                guard let self = self, self.shouldKeepLoopAlive, !self.isPlayingOutput, !self.isMuted else { return }
                                 self.startListeningWindow()
                             }
                         }
                     }
                 }
             }
+            return true
         } catch {
-            print("[CabinAudioEngine] Failed to start speech recognizer: \(error.localizedDescription)")
+            print("[CabinAudioEngine] AudioEngine start warning: \(error.localizedDescription)")
+            return false
         }
     }
 
@@ -260,29 +306,42 @@ final class CabinAudioEngine: NSObject, ObservableObject, AVAudioPlayerDelegate,
         latestRecognizedText = ""
         guard !committed.isEmpty else { return }
 
-        stopListening()
-        AcousticEarcons.shared.play(.handoffHealed)
+        // Immediately stop listening and switch AVAudioSession back to CarPlay .playback mode
+        stopListening(switchToPlaybackSession: true)
         onSpokenSentenceCompleted?(committed)
     }
 
-    func stopListening() {
+    func stopListening(switchToPlaybackSession: Bool = false) {
         silenceTimer?.invalidate()
         silenceTimer = nil
-        if audioEngine.isRunning {
-            audioEngine.stop()
+        if let engine = audioEngine {
+            if engine.isRunning {
+                engine.stop()
+            }
+            engine.inputNode.removeTap(onBus: 0)
         }
-        audioEngine.inputNode.removeTap(onBus: 0)
+        audioEngine = nil
         recognitionRequest?.endAudio()
         recognitionRequest = nil
         recognitionTask?.cancel()
         recognitionTask = nil
-        DispatchQueue.main.async {
+
+        if switchToPlaybackSession {
+            configureCarPlayPlaybackSession()
+        }
+
+        if Thread.isMainThread {
             self.isCapturing = false
             self.inputLevel = 0.0
+        } else {
+            DispatchQueue.main.async {
+                self.isCapturing = false
+                self.inputLevel = 0.0
+            }
         }
     }
 
-    // MARK: - 4. State B: Rock-Solid .caf File Playback (`Hands-Free Lingo` / Audiobook Path) + Auto-Resume
+    // MARK: - 5. State B: Rock-Solid .caf File Playback (`Hands-Free Lingo` Proven Path) + Auto-Resume
 
     func speakFallbackText(_ text: String, completion: (() -> Void)? = nil) {
         let cleaned = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -294,18 +353,27 @@ final class CabinAudioEngine: NSObject, ObservableObject, AVAudioPlayerDelegate,
             return
         }
 
-        // 1. Stop microphone completely so it is 100% impossible to hear our own voice
-        stopListening()
-        speechCompletionHandler = completion
-
-        DispatchQueue.main.async {
+        // 1. Synchronously mark output active & stop microphone so there is ZERO race condition with startListeningWindow
+        if Thread.isMainThread {
             self.isPlayingOutput = true
+        } else {
+            DispatchQueue.main.sync {
+                self.isPlayingOutput = true
+            }
         }
 
-        // 2. Render to a high-gain .caf file on disk and play via AVAudioPlayer (100% CarPlay A2DP compatible)
+        stopListening(switchToPlaybackSession: true)
+        audioPlayer?.stop()
+        audioPlayer = nil
+        if fallbackSynth.isSpeaking {
+            fallbackSynth.stopSpeaking(at: .immediate)
+        }
+        speechCompletionHandler = completion
+
+        // 2. Render to .caf in Documents/AudioCache on serial renderQueue and play via AVAudioPlayer
         renderQueue.async { [weak self] in
             guard let self = self else { return }
-            if let cafURL = self.renderSpeechToCafFile(text: cleaned) {
+            if let cafURL = self.renderOrFetchCachedCafFile(text: cleaned) {
                 DispatchQueue.main.async {
                     self.playRenderedCafFile(url: cafURL, fallbackText: cleaned)
                 }
@@ -317,16 +385,32 @@ final class CabinAudioEngine: NSObject, ObservableObject, AVAudioPlayerDelegate,
         }
     }
 
-    private func renderSpeechToCafFile(text: String) -> URL? {
-        let voice = Self.pickBestDistinctMaleOrPremiumVoice()
+    private func renderOrFetchCachedCafFile(text: String) -> URL? {
+        guard let voice = Self.pickVerifiedHumanVoice() else { return nil }
+        let rate = AVSpeechUtteranceDefaultSpeechRate * 0.96
+        let pitch: Float = 0.98
+        let volume: Float = 1.0
+        let postGain: Float = 1.45
+
+        guard let cacheDir = try? Self.ensureCacheDirectory() else { return nil }
+        let fileKey = Self.cacheKey(text: text, voiceID: voice.identifier, rate: rate, pitch: pitch, postGain: postGain)
+        let destURL = cacheDir.appendingPathComponent("\(fileKey).caf")
+
+        if FileManager.default.fileExists(atPath: destURL.path),
+           let attrs = try? FileManager.default.attributesOfItem(atPath: destURL.path),
+           let fileSize = attrs[.size] as? UInt64,
+           fileSize > 512 {
+            return destURL
+        }
+
+        let tmpURL = cacheDir.appendingPathComponent("\(UUID().uuidString).tmp.caf")
         let utterance = AVSpeechUtterance(string: text)
         utterance.voice = voice
-        utterance.rate = AVSpeechUtteranceDefaultSpeechRate * 0.96
-        utterance.pitchMultiplier = 0.96
-        utterance.volume = 1.0
-
-        let tmpURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("carspeak_turn_\(UUID().uuidString).caf")
+        utterance.rate = rate
+        utterance.pitchMultiplier = pitch
+        utterance.volume = volume
+        utterance.preUtteranceDelay = 0.0
+        utterance.postUtteranceDelay = 0.0
 
         let synth = AVSpeechSynthesizer()
         var audioFile: AVAudioFile?
@@ -334,7 +418,7 @@ final class CabinAudioEngine: NSObject, ObservableObject, AVAudioPlayerDelegate,
         var didFinish = false
         var hadError = false
 
-        synth.write(utterance) { buffer in
+        synth.write(utterance) { (buffer: AVAudioBuffer) in
             guard let pcm = buffer as? AVAudioPCMBuffer else {
                 hadError = true
                 if !didFinish { didFinish = true; sem.signal() }
@@ -353,14 +437,15 @@ final class CabinAudioEngine: NSObject, ObservableObject, AVAudioPlayerDelegate,
                         interleaved: false
                     )
                 }
-                // Apply +3.5 dB cabin clarity boost
                 if let channelData = pcm.floatChannelData {
                     let frames = Int(pcm.frameLength)
                     let channels = Int(pcm.format.channelCount)
                     for ch in 0..<channels {
                         let ptr = channelData[ch]
                         for i in 0..<frames {
-                            ptr[i] = max(-1.0, min(1.0, ptr[i] * 1.45))
+                            var v = ptr[i] * postGain
+                            if v > 1.0 { v = 1.0 } else if v < -1.0 { v = -1.0 }
+                            ptr[i] = v
                         }
                     }
                 }
@@ -371,22 +456,29 @@ final class CabinAudioEngine: NSObject, ObservableObject, AVAudioPlayerDelegate,
             }
         }
 
-        let waitResult = sem.wait(timeout: .now() + 15.0)
+        let waited = sem.wait(timeout: .now() + 25.0)
+        let wroteAudio = (audioFile != nil)
         audioFile = nil
-        if waitResult == .timedOut || hadError || !FileManager.default.fileExists(atPath: tmpURL.path) {
+
+        if waited == .timedOut || hadError || !wroteAudio || !FileManager.default.fileExists(atPath: tmpURL.path) {
+            try? FileManager.default.removeItem(at: tmpURL)
             return nil
         }
-        return tmpURL
+
+        if FileManager.default.fileExists(atPath: destURL.path) {
+            try? FileManager.default.removeItem(at: destURL)
+        }
+        do {
+            try FileManager.default.moveItem(at: tmpURL, to: destURL)
+            return destURL
+        } catch {
+            return tmpURL
+        }
     }
 
     private func playRenderedCafFile(url: URL, fallbackText: String) {
-        let session = AVAudioSession.sharedInstance()
-        try? session.setCategory(
-            .playAndRecord,
-            mode: .spokenAudio,
-            options: [.allowBluetooth, .allowBluetoothA2DP, .mixWithOthers, .duckOthers, .defaultToSpeaker]
-        )
-        try? session.setActive(true)
+        // Ensure AVAudioSession is in pure .playback CarPlay mode right before starting AVAudioPlayer
+        configureCarPlayPlaybackSession()
 
         do {
             let player = try AVAudioPlayer(contentsOf: url)
@@ -394,6 +486,12 @@ final class CabinAudioEngine: NSObject, ObservableObject, AVAudioPlayerDelegate,
             player.volume = 1.0
             player.prepareToPlay()
             self.audioPlayer = player
+            self.isPlayingOutput = true
+            SteeringWheelController.shared.updateNowPlayingDashboard(
+                duration: player.duration,
+                elapsed: 0.0,
+                isSpeaking: true
+            )
             if !player.play() {
                 playDirectSynthesizerFallback(text: fallbackText)
             }
@@ -403,30 +501,64 @@ final class CabinAudioEngine: NSObject, ObservableObject, AVAudioPlayerDelegate,
     }
 
     private func playDirectSynthesizerFallback(text: String) {
+        configureCarPlayPlaybackSession()
         let utterance = AVSpeechUtterance(string: text)
-        utterance.voice = Self.pickBestDistinctMaleOrPremiumVoice()
+        utterance.voice = Self.pickVerifiedHumanVoice()
         utterance.rate = AVSpeechUtteranceDefaultSpeechRate * 0.96
-        utterance.pitchMultiplier = 0.96
+        utterance.pitchMultiplier = 0.98
         utterance.volume = 1.0
+        SteeringWheelController.shared.updateNowPlayingDashboard(duration: 15.0, elapsed: 0.0, isSpeaking: true)
         fallbackSynth.speak(utterance)
     }
 
-    private static func pickBestDistinctMaleOrPremiumVoice() -> AVSpeechSynthesisVoice? {
-        let voices = AVSpeechSynthesisVoice.speechVoices().filter { $0.language == "en-US" || $0.language.hasPrefix("en") }
-        // Prefer distinct male English voice (Aaron, Alex, Daniel, Arthur) so Dr. Mohit never confuses CarSpeak with female Siri
-        if let malePremium = voices.first(where: { $0.gender == .male && $0.quality == .premium }) {
-            return malePremium
+    /// Selects a natural human voice (preferring distinct British/US male voices like Daniel, Arthur, Oliver, Aaron
+    /// so it is never confused with female US Siri, while strictly filtering out Apple novelty voices).
+    private static func pickVerifiedHumanVoice() -> AVSpeechSynthesisVoice? {
+        let allVoices = AVSpeechSynthesisVoice.speechVoices()
+        let preferredNames = ["Daniel", "Arthur", "Oliver", "Aaron", "Rishi", "Alex", "Samantha", "Ava", "Allison", "Karen", "Moira"]
+
+        // 1. Check for premium/enhanced version of preferred human voices first
+        for name in preferredNames {
+            if let v = allVoices.first(where: { $0.name.localizedCaseInsensitiveContains(name) && $0.quality == .premium }) {
+                return v
+            }
+            if let v = allVoices.first(where: { $0.name.localizedCaseInsensitiveContains(name) && $0.quality == .enhanced }) {
+                return v
+            }
         }
-        if let maleEnhanced = voices.first(where: { $0.gender == .male && $0.quality == .enhanced }) {
-            return maleEnhanced
+        // 2. Check for standard version of Daniel (en-GB male) or Aaron (en-US male) or Samantha (en-US)
+        for name in preferredNames {
+            if let v = allVoices.first(where: { $0.name.localizedCaseInsensitiveContains(name) }) {
+                return v
+            }
         }
-        if let maleAny = voices.first(where: { $0.gender == .male && $0.language == "en-US" }) {
-            return maleAny
-        }
-        if let premium = voices.first(where: { $0.quality == .premium }) {
-            return premium
+        // 3. Exact Hands-Free Lingo fallback
+        let exact = allVoices.filter { $0.language == "en-US" }
+        if let v = exact.first(where: { $0.quality == .premium })
+            ?? exact.first(where: { $0.quality == .enhanced })
+            ?? exact.first {
+            return v
         }
         return AVSpeechSynthesisVoice(language: "en-US")
+    }
+
+    private static func ensureCacheDirectory() throws -> URL {
+        let docs = try FileManager.default.url(
+            for: .documentDirectory,
+            in: .userDomainMask,
+            appropriateFor: nil,
+            create: true
+        )
+        let dir = docs.appendingPathComponent("AudioCache", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    private static func cacheKey(text: String, voiceID: String, rate: Float, pitch: Float, postGain: Float) -> String {
+        var hasher = Insecure.SHA1()
+        let combined = "\(text)|\(voiceID)|\(String(format: "%.3f", rate))|\(String(format: "%.3f", pitch))|\(String(format: "%.3f", postGain))"
+        hasher.update(data: Data(combined.utf8))
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
 
     func interruptPlaybackImmediately() {
@@ -442,10 +574,13 @@ final class CabinAudioEngine: NSObject, ObservableObject, AVAudioPlayerDelegate,
     func enqueueLiveOutputPCM24k(_ data: Data) {}
     func flushPlaybackBuffer() {}
 
-    // MARK: - 5. State C: Auto-Resume Listening When Speech Finishes
+    // MARK: - 6. State C: Auto-Resume Listening When Speech Finishes
 
     func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
-        try? FileManager.default.removeItem(at: player.url ?? URL(fileURLWithPath: ""))
+        finishSpeakingAndAutoResumeListening()
+    }
+
+    func audioPlayerDecodeErrorDidOccur(_ player: AVAudioPlayer, error: Error?) {
         finishSpeakingAndAutoResumeListening()
     }
 
@@ -457,18 +592,16 @@ final class CabinAudioEngine: NSObject, ObservableObject, AVAudioPlayerDelegate,
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
             self.isPlayingOutput = false
-            // Unduck background music while waiting for user to speak
-            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+            SteeringWheelController.shared.updateNowPlayingDashboard(isSpeaking: false)
 
             let cb = self.speechCompletionHandler
             self.speechCompletionHandler = nil
             cb?()
 
-            // Automatically re-open the listening window after 0.35s so the conversation continues hands-free!
+            // Automatically re-open the listening window after 0.30s so the conversation continues hands-free!
             if self.shouldKeepLoopAlive && !self.isMuted {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.30) { [weak self] in
                     guard let self = self, self.shouldKeepLoopAlive, !self.isPlayingOutput, !self.isMuted else { return }
-                    AcousticEarcons.shared.play(.sessionReady)
                     self.startListeningWindow()
                 }
             }

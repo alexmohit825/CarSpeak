@@ -1,17 +1,15 @@
 import Foundation
 import Combine
 
-/// MS Copilot-Style 5G-Resilient Continuous Conversational Engine for CarSpeak.
+/// MS Copilot-Style 5G-Resilient Continuous Conversational Engine for CarPlay & iPhone.
 ///
 /// Architecture:
-/// 1. Continuous Turn-by-Turn Loop (`On-Device SFSpeechRecognizer` -> `Cloudflare /api/chat` -> `.caf AVAudioPlayer` -> `Auto-Listen`):
-///    - Zero raw PCM WebSocket streaming over 5G while speaking (100% immune to 5G tower handoff packet loss).
-///    - The moment Dr. Mohit pauses for 1.55 seconds, the complete sentence is sent via a tiny 1.5 KB HTTPS POST
-///      to `https://carspeak-api.mohalex.workers.dev/api/chat` (powered by `Gemini 3.8 Flash` + all 56 Antigravity projects).
-///    - The spoken reply is rendered to a high-gain `.caf` file and played via `AVAudioPlayer` (using a distinct male voice
-///      so it is never confused with Siri).
-///    - The instant the reply finishes playing, `CabinAudioEngine` plays a ready chime and automatically starts listening
-///      again for the entire drive!
+/// 1. Strict Sequential State Machine (`Speaking (.playback .caf AVAudioPlayer)` -> `Auto-Resume Listening (.playAndRecord SFSpeechRecognizer)` -> `Thinking (/api/chat)` -> `Speaking`):
+///    - Never runs `startListeningWindow()` and `speakFallbackText()` simultaneously.
+///    - Always speaks the opening greeting or project briefing over CarPlay stereo (`.playback` + `.allowAirPlay` + `.allowBluetoothA2DP`),
+///      and only opens the microphone AFTER `audioPlayerDidFinishPlaying` fires.
+///    - Whenever CarPlay connects or the user taps the CarPlay trigger row, `forceSpeakGreeting: true` forces a fresh
+///      CarPlay audio session handoff and speaks out loud immediately (never silently no-opping when `isLiveSessionActive` is already true).
 final class GeminiLiveSessionManager: NSObject, ObservableObject {
     static let shared = GeminiLiveSessionManager()
 
@@ -22,6 +20,9 @@ final class GeminiLiveSessionManager: NSObject, ObservableObject {
     @Published var liveModelTranscript: String = ""
     @Published var telemetry = HandoffTelemetry()
     @Published var isProcessingCommand: Bool = false
+
+    /// Called whenever a spoken turn state changes so CarPlay can gently refresh its list rows without spamming `setRootTemplate`.
+    var onCarPlayStateChanged: (() -> Void)?
 
     let audioEngine = CabinAudioEngine()
     let handoffMonitor = CellularHandoffMonitor()
@@ -61,59 +62,58 @@ final class GeminiLiveSessionManager: NSObject, ObservableObject {
         }
     }
 
-    // MARK: - Start / Stop Continuous Copilot Loop (CarPlay Dashboard Tap or iPhone Launch)
+    // MARK: - Start / Resume Continuous Copilot Loop (CarPlay Dashboard Tap or iPhone Launch)
 
-    func startOrResumeFromSiriOrCarPlay(switchTopic: String? = nil) {
+    func startOrResumeFromSiriOrCarPlay(switchTopic: String? = nil, forceSpeakGreeting: Bool = true) {
         if let topic = switchTopic, !topic.isEmpty {
-            if !isLiveSessionActive {
-                isLiveSessionActive = true
-                audioEngine.startCabinDuplexStream()
-            }
+            isLiveSessionActive = true
+            audioEngine.startCabinDuplexStream(openMicImmediately: false)
             Task { @MainActor in
                 if let switched = await vault.switchConversation(queryOrId: topic) {
-                    SteeringWheelController.shared.updateNowPlayingDashboard()
+                    SteeringWheelController.shared.updateNowPlayingDashboard(isSpeaking: true)
                     await sendVoiceOrTextCommand("We switched to \(switched.title). In two short sentences, summarize where we left off.")
                 } else {
-                    await sendVoiceOrTextCommand("Let's discuss my Antigravity project \(topic).")
+                    await sendVoiceOrTextCommand("Let's discuss my Antigravity project \(topic). Summarize its focus in two short sentences.")
                 }
             }
             return
         }
 
-        if !isLiveSessionActive {
-            startHandsFreeSession()
-        } else if !audioEngine.isPlayingOutput && !audioEngine.isCapturing {
-            audioEngine.startListeningWindow()
-            connectionStatusText = "Listening Continuously • Speak Anytime"
-        }
+        startHandsFreeSession(forceRestartAudio: forceSpeakGreeting)
     }
 
     func restartOrStartHandsFreeSession() {
-        startOrResumeFromSiriOrCarPlay(switchTopic: nil)
+        startHandsFreeSession(forceRestartAudio: true)
     }
 
     func startHandsFreeSession(forceRestartAudio: Bool = false) {
-        if isLiveSessionActive {
-            if forceRestartAudio && !audioEngine.isPlayingOutput {
+        if isLiveSessionActive && !forceRestartAudio {
+            if !audioEngine.isPlayingOutput && !audioEngine.isCapturing {
                 audioEngine.startListeningWindow()
             }
             return
         }
 
         isLiveSessionActive = true
-        telemetry.connectionState = "5G Turn-by-Turn Active"
-        connectionStatusText = "CarSpeak Ready • Speaking Greeting..."
-        SteeringWheelController.shared.updateNowPlayingDashboard()
+        telemetry.connectionState = "5G CarPlay Active"
+        connectionStatusText = "CarSpeak Speaking Greeting..."
 
-        // Start continuous loop and speak a crisp opening greeting; as soon as the greeting finishes,
-        // CabinAudioEngine automatically plays the ready chime and opens the microphone!
-        audioEngine.startCabinDuplexStream()
+        // Arm the continuous loop with openMicImmediately: false so the mic does NOT collide with the greeting playback!
+        // As soon as the greeting .caf finishes playing on CarPlay, CabinAudioEngine automatically opens the mic!
+        audioEngine.startCabinDuplexStream(openMicImmediately: false)
+
         let activeTitle = vault.activeConversation?.projectName ?? "all 56 Antigravity projects"
         let greeting = "CarSpeak ready with \(activeTitle). What would you like to discuss?"
         liveModelTranscript = greeting
+        SteeringWheelController.shared.updateNowPlayingDashboard(isSpeaking: true)
+        onCarPlayStateChanged?()
+
         audioEngine.speakFallbackText(greeting) { [weak self] in
             DispatchQueue.main.async {
-                self?.connectionStatusText = "Listening Continuously • Speak Anytime"
+                guard let self = self else { return }
+                self.connectionStatusText = "Listening Continuously • Speak Anytime"
+                SteeringWheelController.shared.updateNowPlayingDashboard(isSpeaking: false)
+                self.onCarPlayStateChanged?()
             }
         }
     }
@@ -121,9 +121,10 @@ final class GeminiLiveSessionManager: NSObject, ObservableObject {
     func stopHandsFreeSession() {
         isLiveSessionActive = false
         audioEngine.stopCabinDuplexStream()
-        connectionStatusText = "Session Paused — Tap Orb to Resume"
+        connectionStatusText = "Session Paused — Tap to Resume"
         telemetry.connectionState = "Standby"
-        SteeringWheelController.shared.updateNowPlayingDashboard()
+        SteeringWheelController.shared.updateNowPlayingDashboard(isSpeaking: false)
+        onCarPlayStateChanged?()
     }
 
     func cyclePersonaMode() {
@@ -134,10 +135,16 @@ final class GeminiLiveSessionManager: NSObject, ObservableObject {
         }
         let announcement = "Switched to \(currentPersona.displayName) mode. Go ahead."
         connectionStatusText = announcement
-        SteeringWheelController.shared.updateNowPlayingDashboard()
+        isLiveSessionActive = true
+        audioEngine.startCabinDuplexStream(openMicImmediately: false)
+        SteeringWheelController.shared.updateNowPlayingDashboard(isSpeaking: true)
+        onCarPlayStateChanged?()
+
         audioEngine.speakFallbackText(announcement) { [weak self] in
             DispatchQueue.main.async {
-                self?.connectionStatusText = "Listening Continuously • \(self?.currentPersona.displayName ?? "")"
+                guard let self = self else { return }
+                self.connectionStatusText = "Listening Continuously • \(self.currentPersona.displayName)"
+                self.onCarPlayStateChanged?()
             }
         }
     }
@@ -227,9 +234,12 @@ final class GeminiLiveSessionManager: NSObject, ObservableObject {
             return
         }
 
+        isLiveSessionActive = true
+        audioEngine.startCabinDuplexStream(openMicImmediately: false)
         isProcessingCommand = true
         liveUserTranscript = trimmed
         connectionStatusText = "Thinking..."
+        onCarPlayStateChanged?()
 
         // Check for spoken stop/pause commands
         let lower = trimmed.lowercased()
@@ -245,15 +255,17 @@ final class GeminiLiveSessionManager: NSObject, ObservableObject {
         isProcessingCommand = false
         liveModelTranscript = reply
         connectionStatusText = "Speaking • \(vault.activeConversation?.title ?? "CarSpeak")"
-        SteeringWheelController.shared.updateNowPlayingDashboard()
+        SteeringWheelController.shared.updateNowPlayingDashboard(isSpeaking: true)
+        onCarPlayStateChanged?()
 
         // Speak the reply via high-gain .caf AVAudioPlayer; when finished, CabinAudioEngine
-        // automatically plays the ready chime and opens the microphone for the next turn!
+        // automatically opens the microphone for the next turn!
         audioEngine.speakFallbackText(reply) { [weak self] in
             DispatchQueue.main.async {
                 guard let self = self, self.isLiveSessionActive else { return }
                 self.connectionStatusText = "Listening Continuously • Speak Anytime"
-                SteeringWheelController.shared.updateNowPlayingDashboard()
+                SteeringWheelController.shared.updateNowPlayingDashboard(isSpeaking: false)
+                self.onCarPlayStateChanged?()
             }
         }
     }
