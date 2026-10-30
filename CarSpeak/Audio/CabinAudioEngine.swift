@@ -154,7 +154,7 @@ final class CabinAudioEngine: NSObject, ObservableObject {
         do {
             // Configure full-duplex conversational audio with Voice Chat mode for Hardware Echo Cancellation
             let options: AVAudioSession.CategoryOptions = [
-                .allowBluetooth,
+                .allowBluetoothHFP,
                 .allowBluetoothA2DP,
                 .allowAirPlay,
                 .defaultToSpeaker,

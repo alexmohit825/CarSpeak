@@ -463,8 +463,12 @@ final class GeminiLiveSessionManager: NSObject, ObservableObject {
         pendingModelTranscriptBuffer = ""
 
         if !u.isEmpty || !m.isEmpty {
-            Task {
-                _ = await vault.appendSpokenTurn(userText: u, modelText: m)
+            Task { @MainActor in
+                await self.vault.appendTurn(
+                    userText: u.isEmpty ? nil : u,
+                    modelText: m.isEmpty ? nil : m,
+                    persona: self.currentPersona
+                )
             }
         }
     }
