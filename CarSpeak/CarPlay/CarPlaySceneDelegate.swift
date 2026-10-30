@@ -2,8 +2,9 @@ import Foundation
 import CarPlay
 import UIKit
 
-/// CarPlay Dashboard Scene Delegate — Built on the exact proven `Hands-Free Lingo` `CPTabBarTemplate`
-/// + `CPNowPlayingTemplate` + `.playback` `.caf` `AVAudioPlayer` architecture.
+/// CarPlay Dashboard Scene Delegate for CarSpeak.
+/// Integrates with CarPlay media audio routing, physical steering wheel controls,
+/// and live voice session triggers for Dr. Mohit's Antigravity portfolio.
 public final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate {
     private var interfaceController: CPInterfaceController?
     private var copilotTabTemplate: CPListTemplate?
@@ -16,7 +17,6 @@ public final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationScene
         _ templateApplicationScene: CPTemplateApplicationScene,
         didConnect interfaceController: CPInterfaceController
     ) {
-        print("[CarPlay] didConnect interfaceController")
         self.interfaceController = interfaceController
         SteeringWheelController.shared.configureRemoteCommands()
 
@@ -31,14 +31,7 @@ public final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationScene
         let tabBar = CPTabBarTemplate(templates: [copilotTab, projectsTab, threadsTab])
         interfaceController.setRootTemplate(tabBar, animated: false, completion: nil)
 
-        // Update only the Copilot tab rows on turn state transitions (never spam setRootTemplate!)
-        GeminiLiveSessionManager.shared.onCarPlayStateChanged = { [weak self] in
-            DispatchQueue.main.async {
-                self?.refreshCopilotSections()
-            }
-        }
-
-        // Automatically speak the opening greeting over CarPlay stereo and enter continuous listening
+        // Automatically start the Gemini Live conversational session over CarPlay audio
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
             GeminiLiveSessionManager.shared.startHandsFreeSession(forceRestartAudio: true)
         }
@@ -47,7 +40,7 @@ public final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationScene
     public func sceneWillEnterForeground(_ scene: UIScene) {
         SteeringWheelController.shared.configureRemoteCommands()
         let manager = GeminiLiveSessionManager.shared
-        if !manager.audioEngine.isPlayingOutput {
+        if !manager.isLiveSessionActive {
             manager.startHandsFreeSession(forceRestartAudio: true)
         }
     }
@@ -56,9 +49,7 @@ public final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationScene
         _ templateApplicationScene: CPTemplateApplicationScene,
         didDisconnectInterfaceController interfaceController: CPInterfaceController
     ) {
-        print("[CarPlay] didDisconnect")
         self.interfaceController = nil
-        GeminiLiveSessionManager.shared.onCarPlayStateChanged = nil
     }
 
     // MARK: - Tab 1: Live Copilot & Controls
@@ -70,7 +61,7 @@ public final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationScene
         return template
     }
 
-    private func refreshCopilotSections() {
+    func refreshCopilotSections() {
         let now = Date()
         let elapsed = now.timeIntervalSince(lastSectionRefreshTime)
         if elapsed >= 1.2 {
@@ -91,28 +82,21 @@ public final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationScene
     private func buildCopilotSections() -> [CPListSection] {
         let manager = GeminiLiveSessionManager.shared
 
-        // 1. Primary Voice Loop Action Row
+        // 1. Primary Full-Duplex Voice Row
         let statusTitle: String
-        let partial = manager.audioEngine.partialTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
         if manager.audioEngine.isPlayingOutput {
-            statusTitle = "🔊 Speaking • Tap to Skip & Listen Now"
-        } else if manager.isProcessingCommand {
-            statusTitle = "⚡ Thinking • Consulting AG Portfolio..."
-        } else if !partial.isEmpty {
-            statusTitle = "🎙️ Hearing: \"\(String(partial.suffix(42)))\""
-        } else if manager.audioEngine.isCapturing {
-            statusTitle = "🎙️ Listening Continuously • Speak Anytime"
+            statusTitle = "🔊 AI Speaking • Tap to Interrupt"
+        } else if manager.isLiveSessionActive {
+            statusTitle = "🎙️ Live • Speak Anytime (Full Duplex)"
         } else {
-            statusTitle = "▶️ Tap to Start Voice Loop (Speaks Greeting)"
+            statusTitle = "▶️ Tap to Connect Gemini Live"
         }
 
         let subtitleText: String
-        if !partial.isEmpty {
-            subtitleText = "Pause 1.5s to auto-send, or tap here to send now"
-        } else if !manager.liveModelTranscript.isEmpty {
+        if !manager.liveModelTranscript.isEmpty {
             subtitleText = manager.liveModelTranscript
         } else {
-            subtitleText = "MS Copilot Loop • Speaks via CarPlay & auto-listens after every answer"
+            subtitleText = "Human neural voice • Hardware echo cancellation active"
         }
 
         let liveVoiceItem = CPListItem(
@@ -123,18 +107,18 @@ public final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationScene
         liveVoiceItem.handler = { _, completion in
             if manager.audioEngine.isPlayingOutput {
                 manager.audioEngine.interruptPlaybackImmediately()
-            } else if manager.audioEngine.commitIfHasPartialTranscript() {
-                // Immediately committed partial spoken sentence
-            } else {
+            } else if !manager.isLiveSessionActive {
                 manager.startHandsFreeSession(forceRestartAudio: true)
+            } else {
+                manager.stopHandsFreeSession()
             }
             completion()
         }
 
-        // 2. Open CarPlay Now Playing Transport Screen (Proven Hands-Free Lingo Pattern)
+        // 2. Open CarPlay Now Playing Transport Screen
         let nowPlayingItem = CPListItem(
             text: "🎛️ Open CarPlay Now Playing Controls",
-            detailText: "Full-screen Play/Pause, Skip & Persona buttons on CarPlay",
+            detailText: "Steering wheel Play/Pause, Skip & Persona mode controls",
             image: UIImage(systemName: "play.circle.fill")
         )
         nowPlayingItem.handler = { [weak self] _, completion in
@@ -145,16 +129,14 @@ public final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationScene
             completion()
         }
 
-        // 3. Microphone Input Source Toggle
-        let micSourceItem = CPListItem(
-            text: manager.audioEngine.useCarBluetoothMic
-                ? "🎤 Mic: Car Cabin (Tap for iPhone Mic)"
-                : "📱 Mic: iPhone High-Gain (Tap for Car Mic)",
-            detailText: "Switch anytime if your iPhone is in your pocket vs mounted",
-            image: UIImage(systemName: "mic.circle.fill")
+        // 3. Mute / Unmute Toggle
+        let muteItem = CPListItem(
+            text: manager.audioEngine.isMuted ? "🔇 Mic Muted (Tap to Unmute)" : "🎤 Cabin Mic Live (Tap to Mute)",
+            detailText: "Mute microphone while continuing to hear audio",
+            image: UIImage(systemName: manager.audioEngine.isMuted ? "mic.slash.fill" : "mic.fill")
         )
-        micSourceItem.handler = { [weak self] _, completion in
-            manager.audioEngine.toggleMicInputSource()
+        muteItem.handler = { [weak self] _, completion in
+            manager.audioEngine.toggleMute()
             self?.refreshCopilotSections()
             completion()
         }
@@ -171,12 +153,12 @@ public final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationScene
         }
 
         let controlSection = CPListSection(
-            items: [liveVoiceItem, nowPlayingItem, micSourceItem, personaItem],
-            header: "CarSpeak • Continuous Hands-Free AI",
+            items: [liveVoiceItem, nowPlayingItem, muteItem, personaItem],
+            header: "CarSpeak • Gemini Live Audio",
             sectionIndexTitle: nil
         )
 
-        // 5. 1-Tap Instant Spoken Briefings
+        // 5. 1-Tap Spoken Briefings
         let quickPrompts: [(title: String, detail: String, query: String)] = [
             (
                 "📊 Portfolio Executive Briefing",
@@ -191,7 +173,7 @@ public final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationScene
             (
                 "🗣️ Orator & Hands-Free Lingo",
                 "Spoken update on CarPlay voice & audio learning apps",
-                "Summarize the status of Orator and Hands-Free Lingo in two spoken sentences and ask what feature we should tackle next."
+                "Summarize the status of Orator and Hands-Free Lingo in two spoken sentences."
             ),
             (
                 "🏥 VigilOR & NeuroCall",
@@ -244,7 +226,7 @@ public final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationScene
                 item.handler = { _, completion in
                     Task { @MainActor in
                         await manager.sendVoiceOrTextCommand(
-                            "Let's discuss my Antigravity project \(proj.displayName). Summarize its focus (\(proj.recentFocus)) in two short spoken sentences and ask what I want to work on."
+                            "Let's discuss my Antigravity project \(proj.displayName). Summarize its focus in two short spoken sentences."
                         )
                         completion()
                     }
@@ -276,7 +258,7 @@ public final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationScene
                 Task { @MainActor in
                     _ = await vault.switchConversation(queryOrId: thread.id)
                     await manager.sendVoiceOrTextCommand(
-                        "Switch to our conversation \(thread.title) and summarize where we left off in two short spoken sentences."
+                        "Switch to our conversation \(thread.title) and summarize where we left off."
                     )
                     completion()
                 }

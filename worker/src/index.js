@@ -628,6 +628,13 @@ export default {
         const activeConv = conversations.find(c => c.id === activeId) || conversations[0];
         const systemInstruction = buildSystemInstruction(persona, projects, activeConv, conversations);
 
+        const PERSONA_VOICES = {
+          executive: 'Puck',
+          surgical: 'Fenrir',
+          architect: 'Charon',
+          memo: 'Aoede'
+        };
+
         const wsUrl = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${env.GEMINI_API_KEY}`;
 
         const setupPayload = {
@@ -638,7 +645,7 @@ export default {
               speechConfig: {
                 voiceConfig: {
                   prebuiltVoiceConfig: {
-                    voiceName: body.voiceName || 'Puck'
+                    voiceName: body.voiceName || PERSONA_VOICES[persona] || 'Puck'
                   }
                 }
               }

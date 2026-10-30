@@ -243,19 +243,22 @@ struct CockpitView: View {
                 }
             }
 
-            Button {
-                audio.toggleMicInputSource()
-            } label: {
-                Label(
-                    audio.useCarBluetoothMic ? "Mic: Car Bluetooth (Tap for iPhone Mic)" : "Mic: iPhone High-Gain (Keeps Music Playing)",
-                    systemImage: audio.useCarBluetoothMic ? "car.fill" : "iphone"
-                )
-                .font(.caption2.weight(.bold))
-                .padding(.horizontal, 14)
-                .padding(.vertical, 8)
-                .background(Color(red: 0.93, green: 0.98, blue: 0.95), in: Capsule())
-                .foregroundStyle(Color(red: 0.04, green: 0.45, blue: 0.32))
+            HStack(spacing: 8) {
+                Circle()
+                    .fill(session.isLiveSessionActive ? Color(red: 0.06, green: 0.73, blue: 0.51) : Color.gray)
+                    .frame(width: 8, height: 8)
+                Text(session.telemetry.connectionState)
+                    .font(.caption2.weight(.bold))
+                    .foregroundStyle(Color(red: 0.04, green: 0.45, blue: 0.32))
+                if session.telemetry.towerHandoffCount > 0 {
+                    Text("• Handoffs: \(session.telemetry.towerHandoffCount)")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
             }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+            .background(Color(red: 0.93, green: 0.98, blue: 0.95), in: Capsule())
         }
         .padding(.vertical, 28)
         .padding(.horizontal, 18)
