@@ -42,6 +42,7 @@ final class GeminiLiveSessionManager: NSObject, ObservableObject {
                 guard let self = self, !partial.isEmpty else { return }
                 self.liveUserTranscript = partial
                 self.connectionStatusText = "Hearing: \"\(partial)\""
+                self.onCarPlayStateChanged?()
             }
             .store(in: &cancellables)
 

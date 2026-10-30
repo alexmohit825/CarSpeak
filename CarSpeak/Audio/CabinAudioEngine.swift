@@ -304,11 +304,20 @@ final class CabinAudioEngine: NSObject, ObservableObject, AVAudioPlayerDelegate,
         silenceTimer = nil
         let committed = latestRecognizedText.trimmingCharacters(in: .whitespacesAndNewlines)
         latestRecognizedText = ""
+        partialTranscript = ""
         guard !committed.isEmpty else { return }
 
         // Immediately stop listening and switch AVAudioSession back to CarPlay .playback mode
         stopListening(switchToPlaybackSession: true)
         onSpokenSentenceCompleted?(committed)
+    }
+
+    /// Allows tapping the CarPlay top row while speaking to immediately commit the current sentence without waiting 1.55s.
+    func commitIfHasPartialTranscript() -> Bool {
+        let current = latestRecognizedText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !current.isEmpty else { return false }
+        commitSpokenTurn()
+        return true
     }
 
     func stopListening(switchToPlaybackSession: Bool = false) {
@@ -550,7 +559,11 @@ final class CabinAudioEngine: NSObject, ObservableObject, AVAudioPlayerDelegate,
             create: true
         )
         let dir = docs.appendingPathComponent("AudioCache", isDirectory: true)
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(
+            at: dir,
+            withIntermediateDirectories: true,
+            attributes: [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication]
+        )
         return dir
     }
 

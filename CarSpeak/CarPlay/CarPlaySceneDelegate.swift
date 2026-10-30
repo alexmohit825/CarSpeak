@@ -9,6 +9,8 @@ public final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationScene
     private var copilotTabTemplate: CPListTemplate?
     private var projectsTabTemplate: CPListTemplate?
     private var threadsTabTemplate: CPListTemplate?
+    private var lastSectionRefreshTime: Date = .distantPast
+    private var pendingRefreshWorkItem: DispatchWorkItem?
 
     public func templateApplicationScene(
         _ templateApplicationScene: CPTemplateApplicationScene,
@@ -42,6 +44,14 @@ public final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationScene
         }
     }
 
+    public func sceneWillEnterForeground(_ scene: UIScene) {
+        SteeringWheelController.shared.configureRemoteCommands()
+        let manager = GeminiLiveSessionManager.shared
+        if !manager.audioEngine.isPlayingOutput {
+            manager.startHandsFreeSession(forceRestartAudio: true)
+        }
+    }
+
     public func templateApplicationScene(
         _ templateApplicationScene: CPTemplateApplicationScene,
         didDisconnectInterfaceController interfaceController: CPInterfaceController
@@ -61,7 +71,21 @@ public final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationScene
     }
 
     private func refreshCopilotSections() {
-        copilotTabTemplate?.updateSections(buildCopilotSections())
+        let now = Date()
+        let elapsed = now.timeIntervalSince(lastSectionRefreshTime)
+        if elapsed >= 1.2 {
+            lastSectionRefreshTime = now
+            copilotTabTemplate?.updateSections(buildCopilotSections())
+        } else {
+            pendingRefreshWorkItem?.cancel()
+            let work = DispatchWorkItem { [weak self] in
+                guard let self = self else { return }
+                self.lastSectionRefreshTime = Date()
+                self.copilotTabTemplate?.updateSections(self.buildCopilotSections())
+            }
+            pendingRefreshWorkItem = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + (1.2 - elapsed), execute: work)
+        }
     }
 
     private func buildCopilotSections() -> [CPListSection] {
@@ -69,19 +93,27 @@ public final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationScene
 
         // 1. Primary Voice Loop Action Row
         let statusTitle: String
+        let partial = manager.audioEngine.partialTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
         if manager.audioEngine.isPlayingOutput {
             statusTitle = "🔊 Speaking • Tap to Skip & Listen Now"
         } else if manager.isProcessingCommand {
             statusTitle = "⚡ Thinking • Consulting AG Portfolio..."
+        } else if !partial.isEmpty {
+            statusTitle = "🎙️ Hearing: \"\(String(partial.suffix(42)))\""
         } else if manager.audioEngine.isCapturing {
             statusTitle = "🎙️ Listening Continuously • Speak Anytime"
         } else {
             statusTitle = "▶️ Tap to Start Voice Loop (Speaks Greeting)"
         }
 
-        let subtitleText = !manager.liveModelTranscript.isEmpty
-            ? manager.liveModelTranscript
-            : "MS Copilot Loop • Speaks via CarPlay & auto-listens after every answer"
+        let subtitleText: String
+        if !partial.isEmpty {
+            subtitleText = "Pause 1.5s to auto-send, or tap here to send now"
+        } else if !manager.liveModelTranscript.isEmpty {
+            subtitleText = manager.liveModelTranscript
+        } else {
+            subtitleText = "MS Copilot Loop • Speaks via CarPlay & auto-listens after every answer"
+        }
 
         let liveVoiceItem = CPListItem(
             text: statusTitle,
@@ -91,6 +123,8 @@ public final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationScene
         liveVoiceItem.handler = { _, completion in
             if manager.audioEngine.isPlayingOutput {
                 manager.audioEngine.interruptPlaybackImmediately()
+            } else if manager.audioEngine.commitIfHasPartialTranscript() {
+                // Immediately committed partial spoken sentence
             } else {
                 manager.startHandsFreeSession(forceRestartAudio: true)
             }
