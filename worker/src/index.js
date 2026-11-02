@@ -309,6 +309,11 @@ ${recentTurns || '(New thread — no prior turns yet)'}
 
   return `${basePersona}
 
+TURN-TAKING PROTOCOL:
+1. Dr. Mohit will speak freely and will say 'over' (or pause) when he concludes his turn.
+2. Deliver a clear, authoritative, intelligent response (2 to 4 crisp sentences unless he asks for deep architectural detail).
+3. Do NOT say 'over' in your own response, and never use markdown symbols (*, #, -) that distract from clean spoken neural audio.
+
 VOICE COMMAND & ARCHIVE CAPABILITIES:
 1. Dr. Mohit can ask you via voice at any time to list previous conversations, switch to a specific archived conversation, start a new conversation, or inspect/update any of his Antigravity (AG) projects.
 2. Always invoke the matching tool (list_archived_conversations, switch_to_conversation, start_new_conversation, get_ag_project_dossier, save_ag_project_roadmap_note) immediately when he asks about a prior conversation or an Antigravity project.
@@ -463,7 +468,7 @@ export default {
   <div class="card">
     <div class="badge">AD-HOC DIRECT • ZERO ASC</div>
     <h1>CarSpeak</h1>
-    <p>Siri Voice Relay on CarPlay + Auto-Start iPhone Voice Consultation for all 56 Antigravity Projects.</p>
+    <p>Continuous In-Car Neural Co-Pilot with 'Over' Turn-Taking for all 56 Antigravity Projects.</p>
     <a class="btn" href="${itmsUrl}">📲 Tap to Install on iPhone</a>
     <div class="meta">
       Signed for <strong>Alex's iPhone</strong><br/>

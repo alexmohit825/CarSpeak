@@ -6,12 +6,15 @@ import UIKit
 ///
 /// Engineering Pillars:
 /// 1. True Full-Duplex Neural Audio: Plays streaming 24kHz PCM from Gemini Live via `AVAudioPlayerNode`
-///    while simultaneously capturing 16kHz PCM from the cabin microphone.
-/// 2. Hardware Acoustic Echo Cancellation (`VoiceProcessingIO`):
-///    Enables Apple's built-in `setVoiceProcessingEnabled(true)` on `inputNode` (the FaceTime/MS Teams standard).
-///    The car stereo speaker output is mathematically cancelled from the microphone line in hardware DSP,
-///    so the AI NEVER hears itself, Dr. Mohit NEVER has to say "over", and natural barge-in / interruption works seamlessly.
-/// 3. Jitter Coalescing Buffer: Smooths out bursty 5G packet arrival so speech playback is completely fluid.
+///    while simultaneously capturing from the iPhone's onboard beamforming microphone.
+/// 2. Car Stereo Bluetooth A2DP & AirPlay Routing:
+///    Explicitly routes input to `.builtInMic` and output to `.allowBluetoothA2DP`, preventing the vehicle
+///    head-unit from entering muted or low-fidelity telephone HFP mode!
+/// 3. Hardware Acoustic Echo Cancellation (`VoiceProcessingIO`):
+///    Enables Apple's built-in `setVoiceProcessingEnabled(true)` on `inputNode`.
+/// 4. Acoustic Gating & "Over" Turn-Taking Engine:
+///    Delegates to `CabinSpeechTranscriber` for on-device Apple Neural Engine speech recognition.
+///    Gated during AI playback so the AI never hears its own speech and NEVER speaks over itself.
 final class CabinAudioEngine: NSObject, ObservableObject {
     @Published var isCapturing: Bool = false
     @Published var isMuted: Bool = false
@@ -20,6 +23,7 @@ final class CabinAudioEngine: NSObject, ObservableObject {
 
     private let audioEngine = AVAudioEngine()
     private let playerNode = AVAudioPlayerNode()
+    let speechTranscriber = CabinSpeechTranscriber()
 
     /// Standard 32-bit Float non-interleaved 24kHz mono format required by iOS AVAudioPlayerNode & AVAudioMixerNode
     private let playbackFormat = AVAudioFormat(
@@ -117,6 +121,8 @@ final class CabinAudioEngine: NSObject, ObservableObject {
         shouldBeCapturing = false
         interruptPlaybackImmediately()
 
+        speechTranscriber.stopTranscribing()
+
         if audioEngine.isRunning {
             audioEngine.stop()
         }
@@ -152,17 +158,24 @@ final class CabinAudioEngine: NSObject, ObservableObject {
     private func configureAudioSessionAndStart() {
         let session = AVAudioSession.sharedInstance()
         do {
-            // Configure full-duplex conversational audio with Voice Chat mode for Hardware Echo Cancellation
+            // Configure high-definition stereo playback with voiceChat mode for hardware echo cancellation.
+            // Using .allowBluetoothA2DP + .defaultToSpeaker prevents the vehicle head-unit from muting
+            // or downgrading audio to 8kHz telephone mode!
             let options: AVAudioSession.CategoryOptions = [
-                .allowBluetoothHFP,
                 .allowBluetoothA2DP,
                 .allowAirPlay,
-                .defaultToSpeaker,
-                .mixWithOthers
+                .defaultToSpeaker
             ]
             try session.setCategory(.playAndRecord, mode: .voiceChat, options: options)
             try session.setPreferredSampleRate(24000)
             try session.setPreferredIOBufferDuration(0.02) // 20ms low-latency buffer
+
+            // Route recording input specifically to the iPhone's mounted studio beamforming microphone.
+            // This bypasses the car's restricted Bluetooth mic bus entirely and eliminates head-unit audio routing conflicts!
+            if let builtInMic = session.availableInputs?.first(where: { $0.portType == .builtInMic }) {
+                try session.setPreferredInput(builtInMic)
+            }
+
             try session.setActive(true, options: [])
         } catch {
             print("[CabinAudioEngine] Audio session warning: \(error.localizedDescription)")
@@ -193,6 +206,7 @@ final class CabinAudioEngine: NSObject, ObservableObject {
             audioEngine.prepare()
             try audioEngine.start()
             playerNode.play()
+            speechTranscriber.startTranscribing()
             DispatchQueue.main.async {
                 self.isCapturing = true
             }
@@ -215,6 +229,9 @@ final class CabinAudioEngine: NSObject, ObservableObject {
             guard let self = self, !self.isMuted else { return }
 
             self.computeRMS(buffer: buffer)
+
+            // Feed raw audio buffer to on-device Speech Transcriber for "Over" detection
+            self.speechTranscriber.appendAudioBuffer(buffer)
 
             guard let converter = converter else { return }
             let ratio = 16000.0 / recordingFormat.sampleRate
@@ -324,6 +341,7 @@ final class CabinAudioEngine: NSObject, ObservableObject {
 
             DispatchQueue.main.async {
                 self.isPlayingOutput = true
+                self.speechTranscriber.setPlaybackGating(true)
             }
 
             self.playerNode.scheduleBuffer(buffer) { [weak self] in
@@ -336,6 +354,8 @@ final class CabinAudioEngine: NSObject, ObservableObject {
                 if !stillActive {
                     DispatchQueue.main.async {
                         self.isPlayingOutput = false
+                        self.speechTranscriber.setPlaybackGating(false)
+                        AcousticEarcons.shared.play(.sessionReady)
                     }
                 }
             }
@@ -355,6 +375,8 @@ final class CabinAudioEngine: NSObject, ObservableObject {
 
         DispatchQueue.main.async {
             self.isPlayingOutput = false
+            self.speechTranscriber.setPlaybackGating(false)
+            AcousticEarcons.shared.play(.sessionReady)
         }
     }
 

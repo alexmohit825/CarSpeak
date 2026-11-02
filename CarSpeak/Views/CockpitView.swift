@@ -4,6 +4,7 @@ struct CockpitView: View {
     @ObservedObject var session = GeminiLiveSessionManager.shared
     @ObservedObject var vault = ConversationVaultClient.shared
     @ObservedObject var audio = GeminiLiveSessionManager.shared.audioEngine
+    @ObservedObject var speech = GeminiLiveSessionManager.shared.audioEngine.speechTranscriber
     @State private var selectedProjectName: String = ""
     @State private var commandInput: String = ""
 
@@ -22,10 +23,11 @@ struct CockpitView: View {
                 .ignoresSafeArea()
 
                 ScrollView {
-                    VStack(spacing: 22) {
+                    VStack(spacing: 20) {
                         headerBadgeRow
                         projectDropdownCard
                         voiceOrbCard
+                        liveSpokenBubbleCard
                         latestTurnCard
                         bottomComposerBar
                     }
@@ -50,9 +52,9 @@ struct CockpitView: View {
         HStack {
             HStack(spacing: 7) {
                 Circle()
-                    .fill(Color(red: 0.06, green: 0.73, blue: 0.51))
+                    .fill(session.isLiveSessionActive ? Color(red: 0.06, green: 0.73, blue: 0.51) : Color.gray)
                     .frame(width: 9, height: 9)
-                Text(session.isLiveSessionActive ? "5G CarPlay Live" : "5G CarPlay Ready")
+                Text(session.isLiveSessionActive ? "5G Continuous Co-Pilot" : "Co-Pilot Standby")
                     .font(.caption.weight(.bold))
                     .foregroundStyle(Color(red: 0.03, green: 0.47, blue: 0.34))
             }
@@ -76,12 +78,12 @@ struct CockpitView: View {
     @ViewBuilder
     private var projectDropdownCard: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("PREVIOUS ANTIGRAVITY PROJECTS")
+            Text("ACTIVE ANTIGRAVITY CONTEXT (56 PROJECTS)")
                 .font(.caption2.weight(.heavy))
                 .foregroundStyle(Color(red: 0.31, green: 0.27, blue: 0.90))
 
             Menu {
-                Button("General Hands-Free Conversation") {
+                Button("General Neurosurgical & Innovation Consult") {
                     selectedProjectName = ""
                 }
                 Divider()
@@ -89,7 +91,7 @@ struct CockpitView: View {
                     Button("\(proj.displayName) — \(proj.category)") {
                         selectedProjectName = proj.displayName
                         Task {
-                            await session.sendVoiceOrTextCommand("Let's pick up where we left off on \(proj.displayName).")
+                            await session.sendVoiceOrTextCommand("Let's focus on \(proj.displayName). Summarize our active focus and roadmap.")
                         }
                     }
                 }
@@ -97,7 +99,7 @@ struct CockpitView: View {
                 HStack {
                     Image(systemName: "folder.fill.badge.gearshape")
                         .foregroundStyle(Color(red: 0.05, green: 0.65, blue: 0.91))
-                    Text(selectedProjectName.isEmpty ? "Select a Previous Project (\(vault.agProjects.count))" : selectedProjectName)
+                    Text(selectedProjectName.isEmpty ? "Select an Antigravity Project (\(vault.agProjects.count))" : selectedProjectName)
                         .font(.subheadline.weight(.semibold))
                         .foregroundStyle(Color(red: 0.07, green: 0.09, blue: 0.15))
                         .lineLimit(1)
@@ -127,7 +129,7 @@ struct CockpitView: View {
                     HStack {
                         Image(systemName: "clock.arrow.circlepath")
                             .foregroundStyle(Color(red: 0.98, green: 0.45, blue: 0.09))
-                        Text(vault.activeConversation?.title ?? "Switch Saved Conversation (\(vault.conversations.count))")
+                        Text(vault.activeConversation?.title ?? "Switch Saved Thread (\(vault.conversations.count))")
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(Color(red: 0.07, green: 0.09, blue: 0.15))
                             .lineLimit(1)
@@ -150,54 +152,64 @@ struct CockpitView: View {
 
     @ViewBuilder
     private var voiceOrbCard: some View {
-        let orbScale: CGFloat = session.isLiveSessionActive ? CGFloat(1.0 + Double(audio.inputLevel) * 0.16) : 1.0
-        let activeGradient = LinearGradient(
-            colors: [
-                Color(red: 0.06, green: 0.73, blue: 0.51),
-                Color(red: 0.05, green: 0.65, blue: 0.91),
-                Color(red: 0.31, green: 0.27, blue: 0.90)
-            ],
+        let isSpeaking = audio.isPlayingOutput
+        let isCapturing = session.isLiveSessionActive && !isSpeaking
+        let orbScale: CGFloat = isSpeaking ? 1.06 : (isCapturing ? CGFloat(1.0 + Double(audio.inputLevel) * 0.16) : 1.0)
+
+        let speakingGradient = LinearGradient(
+            colors: [Color(red: 0.55, green: 0.36, blue: 0.96), Color(red: 0.31, green: 0.27, blue: 0.90)],
             startPoint: .topLeading,
             endPoint: .bottomTrailing
         )
-        let idleGradient = LinearGradient(
-            colors: [
-                Color(red: 0.31, green: 0.27, blue: 0.90),
-                Color(red: 0.05, green: 0.65, blue: 0.91),
-                Color(red: 0.55, green: 0.36, blue: 0.96)
-            ],
+        let listeningGradient = LinearGradient(
+            colors: [Color(red: 0.06, green: 0.73, blue: 0.51), Color(red: 0.05, green: 0.65, blue: 0.91)],
+            startPoint: .topLeading,
+            endPoint: .bottomTrailing
+        )
+        let standbyGradient = LinearGradient(
+            colors: [Color.gray, Color.secondary],
             startPoint: .topLeading,
             endPoint: .bottomTrailing
         )
 
         VStack(spacing: 18) {
             Button {
-                if session.isLiveSessionActive {
-                    session.stopHandsFreeSession()
+                if isSpeaking {
+                    // Tap to interrupt AI speech immediately
+                    audio.interruptPlaybackImmediately()
+                } else if isCapturing {
+                    // If Dr. Mohit has spoken text, force send turn immediately
+                    if !speech.liveTranscript.isEmpty {
+                        speech.forceSubmitCurrentTranscript()
+                    } else {
+                        session.stopHandsFreeSession()
+                    }
                 } else {
                     session.startHandsFreeSession()
                 }
             } label: {
                 ZStack {
                     Circle()
-                        .fill(session.isLiveSessionActive ? activeGradient : idleGradient)
-                        .frame(width: 156, height: 156)
+                        .fill(isSpeaking ? speakingGradient : (isCapturing ? listeningGradient : standbyGradient))
+                        .frame(width: 160, height: 160)
                         .scaleEffect(orbScale)
                         .shadow(
-                            color: (session.isLiveSessionActive
-                                    ? Color(red: 0.06, green: 0.73, blue: 0.51)
-                                    : Color(red: 0.05, green: 0.65, blue: 0.91)).opacity(0.38),
-                            radius: 22,
+                            color: (isSpeaking
+                                    ? Color(red: 0.31, green: 0.27, blue: 0.90)
+                                    : (isCapturing ? Color(red: 0.06, green: 0.73, blue: 0.51) : Color.gray)).opacity(0.38),
+                            radius: 24,
                             y: 10
                         )
 
                     VStack(spacing: 8) {
-                        Image(systemName: session.isLiveSessionActive ? "waveform" : "mic.fill")
+                        Image(systemName: isSpeaking ? "speaker.wave.3.fill" : (isCapturing ? "waveform" : "mic.fill"))
                             .font(.system(size: 44, weight: .bold))
                             .foregroundStyle(.white)
-                        Text(session.isLiveSessionActive ? "LISTENING" : "TAP TO SPEAK")
-                            .font(.caption.weight(.heavy))
+
+                        Text(isSpeaking ? "TAP TO STOP" : (isCapturing ? "SAY 'OVER' OR TAP" : "TAP TO START"))
+                            .font(.caption2.weight(.heavy))
                             .foregroundStyle(.white)
+                            .tracking(0.5)
                     }
                 }
             }
@@ -223,7 +235,7 @@ struct CockpitView: View {
                 Button {
                     audio.interruptPlaybackImmediately()
                 } label: {
-                    Label("Stop Audio", systemImage: "stop.circle.fill")
+                    Label("Interrupt", systemImage: "stop.circle.fill")
                         .font(.caption.weight(.bold))
                         .padding(.horizontal, 14)
                         .padding(.vertical, 9)
@@ -260,19 +272,54 @@ struct CockpitView: View {
             .padding(.vertical, 8)
             .background(Color(red: 0.93, green: 0.98, blue: 0.95), in: Capsule())
         }
-        .padding(.vertical, 28)
+        .padding(.vertical, 26)
         .padding(.horizontal, 18)
         .frame(maxWidth: .infinity)
         .background(Color.white, in: RoundedRectangle(cornerRadius: 26))
         .shadow(color: Color.black.opacity(0.05), radius: 16, y: 6)
     }
 
-    // MARK: - 4. Active Turn Response Card (Hidden When Empty)
+    // MARK: - 4. Live Spoken Bubble (While Dr. Mohit is talking)
+
+    @ViewBuilder
+    private var liveSpokenBubbleCard: some View {
+        if !speech.liveTranscript.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Image(systemName: "mic.fill")
+                        .font(.caption.weight(.bold))
+                    Text("Hearing You (Say 'Over' to Finish)")
+                        .font(.caption2.weight(.heavy))
+                        .tracking(0.5)
+                    Spacer()
+                    Button("Send Now") {
+                        speech.forceSubmitCurrentTranscript()
+                    }
+                    .font(.caption2.weight(.bold))
+                    .foregroundStyle(Color(red: 0.06, green: 0.73, blue: 0.51))
+                }
+                .foregroundStyle(Color(red: 0.06, green: 0.73, blue: 0.51))
+
+                Text(speech.liveTranscript)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(Color(red: 0.07, green: 0.09, blue: 0.15))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .padding(14)
+            .background(Color(red: 0.93, green: 0.98, blue: 0.95), in: RoundedRectangle(cornerRadius: 16))
+            .overlay(
+                RoundedRectangle(cornerRadius: 16)
+                    .stroke(Color(red: 0.06, green: 0.73, blue: 0.51).opacity(0.35), lineWidth: 1.5)
+            )
+        }
+    }
+
+    // MARK: - 5. Active Turn Response Card (Model Answer)
 
     @ViewBuilder
     private var latestTurnCard: some View {
-        if !session.liveModelTranscript.isEmpty {
-            VStack(alignment: .leading, spacing: 8) {
+        if !session.liveModelTranscript.isEmpty || !session.liveUserTranscript.isEmpty {
+            VStack(alignment: .leading, spacing: 10) {
                 if !session.liveUserTranscript.isEmpty {
                     Text(session.liveUserTranscript)
                         .font(.caption.weight(.semibold))
@@ -288,12 +335,14 @@ struct CockpitView: View {
                             in: RoundedRectangle(cornerRadius: 12)
                         )
                 }
-                Text(session.liveModelTranscript)
-                    .font(.subheadline)
-                    .foregroundStyle(Color(red: 0.07, green: 0.09, blue: 0.15))
-                    .padding(14)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(Color(red: 0.95, green: 0.97, blue: 1.00), in: RoundedRectangle(cornerRadius: 14))
+                if !session.liveModelTranscript.isEmpty {
+                    Text(session.liveModelTranscript)
+                        .font(.subheadline)
+                        .foregroundStyle(Color(red: 0.07, green: 0.09, blue: 0.15))
+                        .padding(14)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Color(red: 0.95, green: 0.97, blue: 1.00), in: RoundedRectangle(cornerRadius: 14))
+                }
             }
             .padding(16)
             .background(Color.white, in: RoundedRectangle(cornerRadius: 20))
@@ -301,12 +350,12 @@ struct CockpitView: View {
         }
     }
 
-    // MARK: - 5. Clean Optional Input Bar
+    // MARK: - 6. Clean Optional Input Bar
 
     @ViewBuilder
     private var bottomComposerBar: some View {
         HStack(spacing: 10) {
-            TextField("Ask anything or say 'Switch to...'", text: $commandInput)
+            TextField("Type a question or Antigravity roadmap note...", text: $commandInput)
                 .textFieldStyle(.plain)
                 .padding(12)
                 .foregroundStyle(Color(red: 0.07, green: 0.09, blue: 0.15))

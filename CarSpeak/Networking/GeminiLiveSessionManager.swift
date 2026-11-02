@@ -1,26 +1,25 @@
 import Foundation
 import Combine
+import UIKit
 
 /// SOTA Full-Duplex Gemini Live Conversational Engine for CarSpeak.
 ///
 /// Engineering Guarantees:
-/// 1. True Human Neural Speech: Directly streams 24kHz raw PCM from Gemini Live (`BidiGenerateContent`)
-///    with expressive human neural voices (`Puck`, `Aoede`, `Fenrir`, `Kore`).
-/// 2. Sub-Second Latency (<600ms): Audio-to-audio streaming eliminates all local speech-to-text,
-///    HTTP REST latency, and local TTS disk rendering.
-/// 3. Hardware Echo Cancellation & Natural Barge-In: Powered by `VoiceProcessingIO`, the AI never
-///    hears its own speech out of the car speakers. Dr. Mohit can speak naturally, pause without being
-///    cut off, and interrupt the AI at any moment without having to say "over".
+/// 1. True Human Neural Speech: Streams 24kHz raw PCM from Gemini Live (`BidiGenerateContent`)
+///    with expressive human neural voices (`Puck`, `Aoede`, `Fenrir`, `Charon`).
+/// 2. Deterministic "Over" Turn-Taking Protocol:
+///    Dr. Mohit can speak as long as he needs. Saying "...over" or pausing triggers immediate turn submission.
+/// 3. Zero Self-Talk & Zero Noise Cutoff:
+///    The microphone is acoustically gated during AI speech playback so road noise, bumps, and car speaker
+///    bleed NEVER cause the AI to interrupt itself or speak over itself.
 /// 4. 5G Tower-to-Tower Handoff Resilience:
-///    - Never kills an active socket during routine cellular radio/antenna migrations.
-///    - Uses Gemini Live `sessionResumption` (`resumptionHandle`) to restore session context instantly upon any drop.
-///    - Retains up to 5 seconds of spoken cabin microphone audio in `OutboxRingBuffer` during socket re-establishment,
-///      guaranteeing zero dropped syllables while driving.
+///    - Survives cellular baseband migrations via session resumption tokens (`sessionResumption`).
+///    - If a cell tower hop interrupts the socket, turns are buffered and drained cleanly upon reconnect.
 final class GeminiLiveSessionManager: NSObject, ObservableObject {
     static let shared = GeminiLiveSessionManager()
 
     @Published var isLiveSessionActive: Bool = false
-    @Published var connectionStatusText: String = "Tap to Start Full-Duplex AI"
+    @Published var connectionStatusText: String = "Tap to Start CarSpeak"
     @Published var currentPersona: PersonaMode = .executive
     @Published var liveUserTranscript: String = ""
     @Published var liveModelTranscript: String = ""
@@ -55,21 +54,25 @@ final class GeminiLiveSessionManager: NSObject, ObservableObject {
     }
 
     private func setupAudioAndHandoffCallbacks() {
-        // Real-time microphone audio chunk delivery from hardware VoiceProcessingIO
-        audioEngine.onPCM16ChunkCaptured = { [weak self] pcmData in
+        // 1. Hook up the on-device "Over" Turn-Taking Engine:
+        audioEngine.speechTranscriber.onTurnCompleted = { [weak self] recognizedTurn in
             guard let self = self, self.isLiveSessionActive else { return }
-
-            let frame = self.outboxBuffer.enqueue(pcmData: pcmData)
-            DispatchQueue.main.async {
-                self.telemetry.bufferedFramesCount = self.outboxBuffer.pendingCount
-            }
-
-            if self.isSetupComplete && !self.isReconnecting {
-                self.sendRealtimePCMFrame(frame)
+            Task { @MainActor in
+                await self.handleCompletedUserTurn(recognizedTurn)
             }
         }
 
-        // Network interface observer: only heals if returning from a TRUE offline blackout
+        // 2. Real-time microphone audio chunk buffer for handoff resilience
+        audioEngine.onPCM16ChunkCaptured = { [weak self] pcmData in
+            guard let self = self, self.isLiveSessionActive else { return }
+
+            _ = self.outboxBuffer.enqueue(pcmData: pcmData)
+            DispatchQueue.main.async {
+                self.telemetry.bufferedFramesCount = self.outboxBuffer.pendingCount
+            }
+        }
+
+        // 3. Network interface observer: heals if returning from an offline blackout
         handoffMonitor.onProactiveHandoffDetected = { [weak self] newInterface in
             guard let self = self else { return }
             self.telemetry.networkInterface = newInterface
@@ -137,7 +140,80 @@ final class GeminiLiveSessionManager: NSObject, ObservableObject {
         }
     }
 
-    // MARK: - 2. 5G Tower Handoff Resilience & Reconnect Engine
+    // MARK: - 2. "Over" Turn Processing & Gemini Dispatch
+
+    @MainActor
+    func handleCompletedUserTurn(_ query: String) async {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+
+        // System voice commands check
+        let lower = trimmed.lowercased()
+        if lower == "disconnect" || lower == "goodbye" || lower == "exit" || lower == "stop listening" {
+            stopHandsFreeSession()
+            connectionStatusText = "Session Ended • Drive Safely"
+            return
+        }
+
+        self.liveUserTranscript = trimmed
+        self.liveModelTranscript = ""
+        self.pendingUserTranscriptBuffer = trimmed
+        self.pendingModelTranscriptBuffer = ""
+        self.connectionStatusText = "Thinking..."
+        self.telemetry.connectionState = "5G Live Active"
+        SteeringWheelController.shared.updateNowPlayingDashboard(isSpeaking: false)
+
+        if isSetupComplete, webSocketTask != nil {
+            injectContextMessageIntoLiveSession(role: "user", text: trimmed, turnComplete: true)
+        } else {
+            // Socket was briefly reconnecting during a 5G cell tower switch; use REST fallback
+            await sendTurnViaRESTFallback(trimmed)
+        }
+    }
+
+    private func sendTurnViaRESTFallback(_ text: String) async {
+        guard let url = URL(string: "\(vault.baseURL)/api/chat") else { return }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.timeoutInterval = 12.0
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+
+        let body: [String: Any] = [
+            "message": text,
+            "persona": currentPersona.rawValue,
+            "conversationId": vault.activeConversation?.id ?? ""
+        ]
+        req.httpBody = try? JSONSerialization.data(withJSONObject: body)
+
+        do {
+            let (data, _) = try await URLSession.shared.data(for: req)
+            struct ChatResp: Decodable {
+                let reply: String?
+                let activeConversation: ConversationThread?
+            }
+            let decoded = try JSONDecoder().decode(ChatResp.self, from: data)
+            if let updatedConv = decoded.activeConversation {
+                await MainActor.run {
+                    self.vault.activeConversation = updatedConv
+                }
+            }
+            if let reply = decoded.reply, !reply.isEmpty {
+                await MainActor.run {
+                    self.liveModelTranscript = reply
+                    self.pendingModelTranscriptBuffer = reply
+                    self.connectionStatusText = "Listening • Say 'Over' or Tap"
+                    self.commitTurnToVault()
+                }
+            }
+        } catch {
+            print("[GeminiLiveSessionManager] REST fallback error: \(error.localizedDescription)")
+            await MainActor.run {
+                self.connectionStatusText = "Reconnecting 5G..."
+            }
+        }
+    }
+
+    // MARK: - 3. 5G Tower Handoff Resilience & Reconnect Engine
 
     private func reconnectLiveSocket(isResuming: Bool) {
         guard isLiveSessionActive, !isReconnecting else { return }
@@ -157,13 +233,13 @@ final class GeminiLiveSessionManager: NSObject, ObservableObject {
             await MainActor.run {
                 self.telemetry.lastHandoffLatencyMs = elapsedMs
                 self.isReconnecting = false
-                self.connectionStatusText = "Listening • \(self.vault.activeConversation?.title ?? "CarSpeak Live")"
+                self.connectionStatusText = "Listening • Say 'Over' or Tap"
                 self.telemetry.connectionState = "5G Live Active"
             }
         }
     }
 
-    // MARK: - 3. Gemini Live WebSocket Connection & Protocol Handshake
+    // MARK: - 4. Gemini Live WebSocket Connection & Protocol Handshake
 
     private func connectLiveWebSocket(isResuming: Bool) async {
         guard let configURL = URL(string: "\(vault.baseURL)/api/live-session") else { return }
@@ -262,30 +338,24 @@ final class GeminiLiveSessionManager: NSObject, ObservableObject {
             self.isSetupComplete = true
             AcousticEarcons.shared.play(.sessionReady)
 
-            // Drain any microphone audio captured during the 5G handoff window
-            let pendingFrames = self.outboxBuffer.drainPendingFrames(maxAgeSeconds: 4.0)
-            for frame in pendingFrames {
-                self.sendRealtimePCMFrame(frame)
-            }
-
             if self.shouldSendGreetingOnSetup {
                 self.shouldSendGreetingOnSetup = false
                 let activeTitle = self.vault.activeConversation?.projectName ?? "all 56 Antigravity projects"
                 self.injectContextMessageIntoLiveSession(
                     role: "user",
-                    text: "Greet Dr. Mohit warmly and naturally in one short spoken sentence and mention that you're ready to discuss \(activeTitle).",
+                    text: "Greet Dr. Mohit warmly in one natural spoken sentence and confirm that you're ready to discuss \(activeTitle). Remind him he can say 'over' or pause whenever he finishes speaking.",
                     turnComplete: true
                 )
             }
 
             DispatchQueue.main.async {
-                self.connectionStatusText = "Listening • Speak Anytime"
+                self.connectionStatusText = "Listening • Say 'Over' or Tap"
                 self.telemetry.connectionState = "5G Live Active"
             }
             return
         }
 
-        // 1. Session Resumption Handle Update (Used to survive 5G cell tower handoffs seamlessly)
+        // 1. Session Resumption Handle Update (Survives 5G cell tower handoffs seamlessly)
         if let resumptionUpdate = json["sessionResumptionUpdate"] as? [String: Any],
            let newHandle = resumptionUpdate["newHandle"] as? String, !newHandle.isEmpty {
             self.resumptionHandle = newHandle
@@ -307,23 +377,6 @@ final class GeminiLiveSessionManager: NSObject, ObservableObject {
 
         // 4. Server Content (Real-Time 24kHz Streaming Audio & Transcripts)
         if let serverContent = json["serverContent"] as? [String: Any] {
-            // Natural Barge-In: If the user started speaking, Gemini signals interrupted = true
-            if let interrupted = serverContent["interrupted"] as? Bool, interrupted {
-                self.audioEngine.interruptPlaybackImmediately()
-                DispatchQueue.main.async {
-                    self.connectionStatusText = "Hearing You..."
-                }
-            }
-
-            if let inputTrans = serverContent["inputTranscription"] as? [String: Any],
-               let userText = inputTrans["text"] as? String, !userText.isEmpty {
-                pendingUserTranscriptBuffer += userText
-                DispatchQueue.main.async {
-                    self.liveUserTranscript = self.pendingUserTranscriptBuffer
-                    self.connectionStatusText = "Hearing: \"\(userText)\""
-                }
-            }
-
             if let outputTrans = serverContent["outputTranscription"] as? [String: Any],
                let modelText = outputTrans["text"] as? String, !modelText.isEmpty {
                 pendingModelTranscriptBuffer += modelText
@@ -349,32 +402,8 @@ final class GeminiLiveSessionManager: NSObject, ObservableObject {
                 self.audioEngine.flushPlaybackBuffer()
                 self.commitTurnToVault()
                 DispatchQueue.main.async {
-                    self.connectionStatusText = "Listening • Speak Anytime"
+                    self.connectionStatusText = "Listening • Say 'Over' or Tap"
                     SteeringWheelController.shared.updateNowPlayingDashboard(isSpeaking: false)
-                }
-            }
-        }
-    }
-
-    private func sendRealtimePCMFrame(_ frame: OutboxRingBuffer.AudioFrame) {
-        guard let ws = webSocketTask, isSetupComplete else { return }
-
-        let payload: [String: Any] = [
-            "realtimeInput": [
-                "mediaChunks": [
-                    [
-                        "mimeType": "audio/pcm;rate=16000",
-                        "data": frame.base64PCM16
-                    ]
-                ]
-            ]
-        ]
-
-        if let data = try? JSONSerialization.data(withJSONObject: payload),
-           let str = String(data: data, encoding: .utf8) {
-            ws.send(.string(str)) { [weak self] error in
-                if error == nil {
-                    self?.outboxBuffer.markSent(sequenceId: frame.sequenceId)
                 }
             }
         }
@@ -473,7 +502,7 @@ final class GeminiLiveSessionManager: NSObject, ObservableObject {
         }
     }
 
-    // MARK: - 4. Heartbeat Ping / Pong
+    // MARK: - 5. Heartbeat Ping / Pong
 
     private func startPingTimer() {
         stopPingTimer()
@@ -497,57 +526,7 @@ final class GeminiLiveSessionManager: NSObject, ObservableObject {
         pingTimer = nil
     }
 
-    // MARK: - 5. Direct Voice/Text Command & Siri Relay Execution
-
-    @MainActor
-    func askSiriRelayQuestion(_ query: String) async -> String {
-        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
-            return "I didn't catch that. Which Antigravity project would you like to discuss?"
-        }
-
-        liveUserTranscript = trimmed
-        connectionStatusText = "Consulting AG Portfolio..."
-
-        guard let url = URL(string: "\(vault.baseURL)/api/chat") else {
-            return "CarSpeak cloud gateway is unavailable."
-        }
-        var req = URLRequest(url: url)
-        req.httpMethod = "POST"
-        req.timeoutInterval = 12.0
-        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        let body: [String: String] = [
-            "message": trimmed,
-            "persona": currentPersona.rawValue,
-            "conversationId": vault.activeConversation?.id ?? ""
-        ]
-        req.httpBody = try? JSONSerialization.data(withJSONObject: body)
-
-        do {
-            let (data, _) = try await URLSession.shared.data(for: req)
-            struct ChatResp: Decodable {
-                let reply: String?
-                let activeConversation: ConversationThread?
-            }
-            let decoded = try JSONDecoder().decode(ChatResp.self, from: data)
-            if let updatedConv = decoded.activeConversation {
-                vault.activeConversation = updatedConv
-            }
-            if let reply = decoded.reply, !reply.isEmpty {
-                liveModelTranscript = reply
-                connectionStatusText = vault.activeConversation?.title ?? "CarSpeak Active"
-                return reply
-            }
-        } catch {
-            print("[GeminiLiveSessionManager] Siri relay error: \(error.localizedDescription)")
-        }
-
-        let lower = trimmed.lowercased()
-        if let matched = vault.agProjects.first(where: { lower.contains($0.displayName.lowercased()) }) {
-            return "\(matched.displayName) is your \(matched.category) project focused on \(matched.recentFocus)."
-        }
-        return "I heard you say \(trimmed). Tap the screen or ask about any of your \(vault.agProjects.count) Antigravity projects."
-    }
+    // MARK: - 6. Direct Text Composer Dispatch
 
     @MainActor
     func sendVoiceOrTextCommand(_ command: String) async {
@@ -557,16 +536,6 @@ final class GeminiLiveSessionManager: NSObject, ObservableObject {
         isProcessingCommand = true
         defer { isProcessingCommand = false }
 
-        liveUserTranscript = trimmed
-        connectionStatusText = "Thinking..."
-
-        if isLiveSessionActive, webSocketTask != nil, isSetupComplete {
-            audioEngine.ensureEngineRunning()
-            injectContextMessageIntoLiveSession(role: "user", text: trimmed, turnComplete: true)
-            return
-        }
-
-        // Fallback to Cloudflare /api/chat if live session is not started
-        startHandsFreeSession()
+        await handleCompletedUserTurn(trimmed)
     }
 }

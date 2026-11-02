@@ -27,11 +27,9 @@
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>CarSpeak uses your vehicle cabin and iPhone microphone for hands-free conversational AI, 5G-resilient voice streaming, and voice-activated thread switching while driving.</string>
+	<string>CarSpeak uses the microphone for continuous hands-free in-car conversational AI with your 56 Antigravity projects.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
-	<string>CarSpeak uses speech recognition to switch between your archived conversations and Antigravity projects hands-free.</string>
-	<key>NSSiriUsageDescription</key>
-	<string>CarSpeak integrates with Siri so you can launch hands-free voice sessions and switch conversations using your steering wheel voice button.</string>
+	<string>CarSpeak uses on-device speech recognition to transcribe your questions and detect the spoken 'over' keyword for seamless turn taking.</string>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>audio</string>

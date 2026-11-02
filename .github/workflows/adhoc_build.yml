@@ -26,6 +26,8 @@ jobs:
     steps:
       - name: 📥 Checkout Repository
         uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: 🛠️ Select Xcode (iOS SDK)
         run: |
@@ -106,3 +108,12 @@ jobs:
           name: CarSpeak-AdHoc-IPA
           path: build/output/CarSpeak.ipa
           retention-days: 14
+
+      - name: 🌐 Stage Signed CarSpeak.ipa for Wireless OTA
+        run: |
+          cp build/output/CarSpeak.ipa worker/public/CarSpeak.ipa
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add worker/public/CarSpeak.ipa
+          git commit -m "chore(ota): Stage signed CarSpeak.ipa binary for Safari OTA [skip ci]" || echo "No changes to commit"
+          git push origin main || echo "Git push skipped"
