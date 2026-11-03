@@ -3,8 +3,8 @@ import CarPlay
 import UIKit
 
 /// CarPlay Dashboard Scene Delegate for CarSpeak.
-/// Acts as a passive mirror display and hands-free control surface for Dr. Mohit's Antigravity portfolio,
-/// completely isolated from audio engine routing to prevent CAN-bus race conditions.
+/// Acts as a clean, glanceable mirror display for Dr. Mohit's Antigravity portfolio,
+/// completely stripped of clunky control menus and muting traps to prevent CAN-bus race conditions.
 public final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate {
     private var interfaceController: CPInterfaceController?
     private var copilotTabTemplate: CPListTemplate?
@@ -54,7 +54,7 @@ public final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationScene
         self.interfaceController = nil
     }
 
-    // MARK: - Tab 1: Live Copilot & Controls
+    // MARK: - Tab 1: Live Copilot & Glanceable Status
 
     private func buildCopilotTabTemplate() -> CPListTemplate {
         let template = CPListTemplate(title: "Copilot", sections: buildCopilotSections())
@@ -83,28 +83,33 @@ public final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationScene
 
     private func buildCopilotSections() -> [CPListSection] {
         let manager = GeminiLiveSessionManager.shared
+        let vault = ConversationVaultClient.shared
 
-        // 1. Primary Full-Duplex Voice Row
+        // 1. Primary Status & Action Row (Zero Clutter)
         let statusTitle: String
+        let subtitleText: String
+        let statusImageName: String
+
         if manager.audioEngine.isPlayingOutput {
             statusTitle = "🔊 AI Speaking • Tap to Interrupt"
+            subtitleText = !manager.liveModelTranscript.isEmpty
+                ? String(manager.liveModelTranscript.prefix(90))
+                : "Speaking through vehicle audio..."
+            statusImageName = "speaker.wave.3.fill"
         } else if manager.isLiveSessionActive {
             statusTitle = "🎙️ Listening • Say 'Over' or Tap to Send"
+            subtitleText = "Speak naturally. Say 'over' when you finish your thought."
+            statusImageName = "waveform.circle.fill"
         } else {
-            statusTitle = "▶️ Tap to Start CarSpeak"
-        }
-
-        let subtitleText: String
-        if !manager.liveModelTranscript.isEmpty {
-            subtitleText = manager.liveModelTranscript
-        } else {
-            subtitleText = "Human neural voice • All 56 Antigravity projects active"
+            statusTitle = "▶️ Tap to Start CarSpeak Session"
+            subtitleText = "Continuous hands-free neural partner for all 56 Antigravity projects"
+            statusImageName = "play.circle.fill"
         }
 
         let liveVoiceItem = CPListItem(
             text: statusTitle,
             detailText: subtitleText,
-            image: UIImage(systemName: manager.audioEngine.isPlayingOutput ? "speaker.wave.3.fill" : "waveform.circle.fill")
+            image: UIImage(systemName: statusImageName)
         )
         liveVoiceItem.handler = { _, completion in
             if manager.audioEngine.isPlayingOutput {
@@ -117,55 +122,65 @@ public final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationScene
             completion()
         }
 
-        // 2. Open CarPlay Now Playing Transport Screen
-        let nowPlayingItem = CPListItem(
-            text: "🎛️ Open CarPlay Now Playing Controls",
-            detailText: "Steering wheel Play/Pause, Skip & Persona mode controls",
-            image: UIImage(systemName: "play.circle.fill")
+        // 2. Active Antigravity Project Glance
+        let activeProjectTitle = vault.activeConversation?.projectName ?? "Antigravity Portfolio"
+        let activeThreadSummary = vault.activeConversation?.summary.isEmpty == false
+            ? String(vault.activeConversation!.summary.prefix(90))
+            : "56 projects active • Neurosurgical, Medicolegal & Finance"
+
+        let projectItem = CPListItem(
+            text: "📁 Active Context: \(activeProjectTitle)",
+            detailText: activeThreadSummary,
+            image: UIImage(systemName: "folder.badge.gearshape.fill")
         )
-        nowPlayingItem.handler = { [weak self] _, completion in
-            self?.interfaceController?.pushTemplate(CPNowPlayingTemplate.shared, animated: true, completion: nil)
+        projectItem.handler = { _, completion in
+            Task { @MainActor in
+                await manager.sendVoiceOrTextCommand("Summarize our active Antigravity focus in two concise spoken sentences.")
+                completion()
+            }
+        }
+
+        // 3. Live Spoken Transcript Glance
+        let transcriptDetail = !manager.liveModelTranscript.isEmpty
+            ? manager.liveModelTranscript
+            : (!manager.liveUserTranscript.isEmpty ? "Hearing: \"\(manager.liveUserTranscript)\"" : "Standing by for your first question.")
+
+        let transcriptItem = CPListItem(
+            text: "💬 Live Transcript",
+            detailText: String(transcriptDetail.prefix(100)),
+            image: UIImage(systemName: "bubble.left.and.bubble.right.fill")
+        )
+        transcriptItem.handler = { _, completion in
             completion()
         }
 
-        // 3. Persona Mode Cycle
-        let personaItem = CPListItem(
-            text: "🧠 Persona: \(manager.currentPersona.displayName)",
-            detailText: "Tap to cycle Executive, Surgical, Architect, Roadmap",
-            image: UIImage(systemName: "sparkles")
-        )
-        personaItem.handler = { _, completion in
-            manager.cyclePersonaMode()
-            completion()
-        }
-
-        let controlSection = CPListSection(
-            items: [liveVoiceItem, nowPlayingItem, personaItem],
+        let mainSection = CPListSection(
+            items: [liveVoiceItem, projectItem, transcriptItem],
             header: "CarSpeak • Continuous In-Car Partner",
             sectionIndexTitle: nil
         )
 
-        // 4. 1-Tap Spoken Briefings
+        // 4. 1-Tap Quick Spoken Consultations
         let quickPrompts: [(title: String, detail: String, query: String)] = [
             (
                 "📊 Portfolio Executive Briefing",
-                "Spoken summary of active Antigravity projects",
+                "Spoken overview across active Antigravity projects",
                 "Give me a crisp two-sentence executive briefing on my active Antigravity projects and ask which one I want to dive into."
             ),
             (
                 "🦴 Spine-Measure & PJKPredict",
-                "Spoken update on spinal deformity & measurement tools",
+                "Status of spinal deformity & alignment tools",
                 "Summarize the current architecture and next milestones for Spine-Measure and PJKPredict in two spoken sentences."
             ),
             (
-                "🗣️ Orator & Hands-Free Lingo",
-                "Spoken update on CarPlay voice & audio learning apps",
-                "Summarize the status of Orator and Hands-Free Lingo in two spoken sentences."
+                "🏥 VigilOR & NeuroCall",
+                "Neurosurgical call & OR intelligence roadmap",
+                "Summarize the status of VigilOR and NeuroCall in two spoken sentences."
             ),
             (
-                "🏥 VigilOR & NeuroCall",
-                "Spoken update on neurosurgical call & OR intelligence",
-                "Summarize the status of VigilOR and NeuroCall in two spoken sentences."
+                "⚖️ MDEsq & CPTArmor",
+                "Medicolegal & coding intelligence status",
+                "Summarize the status of MDEsq and CPTArmor in two spoken sentences."
             )
         ]
 
@@ -186,11 +201,11 @@ public final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationScene
 
         let quickSection = CPListSection(
             items: quickItems,
-            header: "Quick Consultations",
+            header: "1-Tap Hands-Free Consultations",
             sectionIndexTitle: nil
         )
 
-        return [controlSection, quickSection]
+        return [mainSection, quickSection]
     }
 
     // MARK: - Tab 2: 56 Antigravity Projects
