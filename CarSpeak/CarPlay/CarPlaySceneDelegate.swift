@@ -3,8 +3,8 @@ import CarPlay
 import UIKit
 
 /// CarPlay Dashboard Scene Delegate for CarSpeak.
-/// Integrates with CarPlay media audio routing, physical steering wheel controls,
-/// and live voice session triggers for Dr. Mohit's Antigravity portfolio.
+/// Acts as a passive mirror display and hands-free control surface for Dr. Mohit's Antigravity portfolio,
+/// completely isolated from audio engine routing to prevent CAN-bus race conditions.
 public final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate {
     private var interfaceController: CPInterfaceController?
     private var copilotTabTemplate: CPListTemplate?
@@ -31,18 +31,20 @@ public final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationScene
         let tabBar = CPTabBarTemplate(templates: [copilotTab, projectsTab, threadsTab])
         interfaceController.setRootTemplate(tabBar, animated: false, completion: nil)
 
-        // Automatically start the Gemini Live conversational session over CarPlay audio
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-            GeminiLiveSessionManager.shared.startHandsFreeSession(forceRestartAudio: true)
+        // Only start session if not already running on iPhone
+        let manager = GeminiLiveSessionManager.shared
+        if !manager.isLiveSessionActive {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                if !manager.isLiveSessionActive {
+                    manager.startHandsFreeSession()
+                }
+            }
         }
     }
 
     public func sceneWillEnterForeground(_ scene: UIScene) {
         SteeringWheelController.shared.configureRemoteCommands()
-        let manager = GeminiLiveSessionManager.shared
-        if !manager.isLiveSessionActive {
-            manager.startHandsFreeSession(forceRestartAudio: true)
-        }
+        refreshCopilotSections()
     }
 
     public func templateApplicationScene(
@@ -64,7 +66,7 @@ public final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationScene
     func refreshCopilotSections() {
         let now = Date()
         let elapsed = now.timeIntervalSince(lastSectionRefreshTime)
-        if elapsed >= 1.2 {
+        if elapsed >= 1.0 {
             lastSectionRefreshTime = now
             copilotTabTemplate?.updateSections(buildCopilotSections())
         } else {
@@ -75,7 +77,7 @@ public final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationScene
                 self.copilotTabTemplate?.updateSections(self.buildCopilotSections())
             }
             pendingRefreshWorkItem = work
-            DispatchQueue.main.asyncAfter(deadline: .now() + (1.2 - elapsed), execute: work)
+            DispatchQueue.main.asyncAfter(deadline: .now() + (1.0 - elapsed), execute: work)
         }
     }
 
@@ -87,16 +89,16 @@ public final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationScene
         if manager.audioEngine.isPlayingOutput {
             statusTitle = "🔊 AI Speaking • Tap to Interrupt"
         } else if manager.isLiveSessionActive {
-            statusTitle = "🎙️ Live • Speak Anytime (Full Duplex)"
+            statusTitle = "🎙️ Listening • Say 'Over' or Tap to Send"
         } else {
-            statusTitle = "▶️ Tap to Connect Gemini Live"
+            statusTitle = "▶️ Tap to Start CarSpeak"
         }
 
         let subtitleText: String
         if !manager.liveModelTranscript.isEmpty {
             subtitleText = manager.liveModelTranscript
         } else {
-            subtitleText = "Human neural voice • Hardware echo cancellation active"
+            subtitleText = "Human neural voice • All 56 Antigravity projects active"
         }
 
         let liveVoiceItem = CPListItem(
@@ -107,10 +109,10 @@ public final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationScene
         liveVoiceItem.handler = { _, completion in
             if manager.audioEngine.isPlayingOutput {
                 manager.audioEngine.interruptPlaybackImmediately()
-            } else if !manager.isLiveSessionActive {
-                manager.startHandsFreeSession(forceRestartAudio: true)
+            } else if manager.isLiveSessionActive {
+                manager.audioEngine.speechTranscriber.forceSubmitCurrentTranscript()
             } else {
-                manager.stopHandsFreeSession()
+                manager.startHandsFreeSession()
             }
             completion()
         }
@@ -123,25 +125,10 @@ public final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationScene
         )
         nowPlayingItem.handler = { [weak self] _, completion in
             self?.interfaceController?.pushTemplate(CPNowPlayingTemplate.shared, animated: true, completion: nil)
-            if !manager.isLiveSessionActive {
-                manager.startHandsFreeSession(forceRestartAudio: true)
-            }
             completion()
         }
 
-        // 3. Mute / Unmute Toggle
-        let muteItem = CPListItem(
-            text: manager.audioEngine.isMuted ? "🔇 Mic Muted (Tap to Unmute)" : "🎤 Cabin Mic Live (Tap to Mute)",
-            detailText: "Mute microphone while continuing to hear audio",
-            image: UIImage(systemName: manager.audioEngine.isMuted ? "mic.slash.fill" : "mic.fill")
-        )
-        muteItem.handler = { [weak self] _, completion in
-            manager.audioEngine.toggleMute()
-            self?.refreshCopilotSections()
-            completion()
-        }
-
-        // 4. Persona Mode Cycle
+        // 3. Persona Mode Cycle
         let personaItem = CPListItem(
             text: "🧠 Persona: \(manager.currentPersona.displayName)",
             detailText: "Tap to cycle Executive, Surgical, Architect, Roadmap",
@@ -153,12 +140,12 @@ public final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationScene
         }
 
         let controlSection = CPListSection(
-            items: [liveVoiceItem, nowPlayingItem, muteItem, personaItem],
-            header: "CarSpeak • Gemini Live Audio",
+            items: [liveVoiceItem, nowPlayingItem, personaItem],
+            header: "CarSpeak • Continuous In-Car Partner",
             sectionIndexTitle: nil
         )
 
-        // 5. 1-Tap Spoken Briefings
+        // 4. 1-Tap Spoken Briefings
         let quickPrompts: [(title: String, detail: String, query: String)] = [
             (
                 "📊 Portfolio Executive Briefing",
@@ -199,66 +186,29 @@ public final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationScene
 
         let quickSection = CPListSection(
             items: quickItems,
-            header: "1-Tap Spoken Briefings",
+            header: "Quick Consultations",
             sectionIndexTitle: nil
         )
 
         return [controlSection, quickSection]
     }
 
-    // MARK: - Tab 2: All 56 Antigravity Projects
+    // MARK: - Tab 2: 56 Antigravity Projects
 
     private func buildProjectsTabTemplate() -> CPListTemplate {
         let vault = ConversationVaultClient.shared
-        let manager = GeminiLiveSessionManager.shared
+        let projects = vault.agProjects
 
-        let grouped = Dictionary(grouping: vault.agProjects, by: { $0.category })
-        let sortedCategories = grouped.keys.sorted()
-
-        let sections: [CPListSection] = sortedCategories.compactMap { category in
-            guard let projects = grouped[category], !projects.isEmpty else { return nil }
-            let items: [CPListItem] = projects.prefix(12).map { proj in
-                let item = CPListItem(
-                    text: proj.displayName,
-                    detailText: proj.recentFocus,
-                    image: UIImage(systemName: "folder.circle.fill")
-                )
-                item.handler = { _, completion in
-                    Task { @MainActor in
-                        await manager.sendVoiceOrTextCommand(
-                            "Let's discuss my Antigravity project \(proj.displayName). Summarize its focus in two short spoken sentences."
-                        )
-                        completion()
-                    }
-                }
-                return item
-            }
-            return CPListSection(items: items, header: category.uppercased(), sectionIndexTitle: nil)
-        }
-
-        let template = CPListTemplate(title: "AG Projects", sections: sections)
-        template.tabTitle = "AG Projects"
-        template.tabImage = UIImage(systemName: "folder.fill")
-        return template
-    }
-
-    // MARK: - Tab 3: Saved Conversation Threads
-
-    private func buildThreadsTabTemplate() -> CPListTemplate {
-        let vault = ConversationVaultClient.shared
-        let manager = GeminiLiveSessionManager.shared
-
-        let threadItems: [CPListItem] = vault.conversations.prefix(15).map { thread in
+        let items: [CPListItem] = projects.prefix(18).map { proj in
             let item = CPListItem(
-                text: thread.title,
-                detailText: "\(thread.projectName ?? "General") • \(thread.summary)",
-                image: UIImage(systemName: "bubble.left.and.bubble.right.fill")
+                text: proj.displayName,
+                detailText: "\(proj.category) • \(proj.recentFocus)",
+                image: UIImage(systemName: "folder.fill")
             )
             item.handler = { _, completion in
                 Task { @MainActor in
-                    _ = await vault.switchConversation(queryOrId: thread.id)
-                    await manager.sendVoiceOrTextCommand(
-                        "Switch to our conversation \(thread.title) and summarize where we left off."
+                    await GeminiLiveSessionManager.shared.sendVoiceOrTextCommand(
+                        "Let's focus on \(proj.displayName). Summarize our current status and roadmap in two concise spoken sentences."
                     )
                     completion()
                 }
@@ -266,14 +216,41 @@ public final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationScene
             return item
         }
 
-        let section = CPListSection(
-            items: threadItems,
-            header: "Saved Conversations",
-            sectionIndexTitle: nil
-        )
-        let template = CPListTemplate(title: "Threads", sections: [section])
-        template.tabTitle = "Threads"
-        template.tabImage = UIImage(systemName: "clock.fill")
+        let section = CPListSection(items: items, header: "Antigravity Projects (\(projects.count))", sectionIndexTitle: nil)
+        let template = CPListTemplate(title: "Projects", sections: [section])
+        template.tabTitle = "Projects"
+        template.tabImage = UIImage(systemName: "folder.badge.gearshape")
+        return template
+    }
+
+    // MARK: - Tab 3: Saved Conversations Vault
+
+    private func buildThreadsTabTemplate() -> CPListTemplate {
+        let vault = ConversationVaultClient.shared
+        let convs = vault.conversations
+
+        let items: [CPListItem] = convs.prefix(12).map { conv in
+            let item = CPListItem(
+                text: conv.title,
+                detailText: "\(conv.projectName ?? "General") • \(conv.turns.count) turns",
+                image: UIImage(systemName: "bubble.left.and.bubble.right.fill")
+            )
+            item.handler = { _, completion in
+                Task { @MainActor in
+                    _ = await vault.switchConversation(queryOrId: conv.id)
+                    await GeminiLiveSessionManager.shared.sendVoiceOrTextCommand(
+                        "We just switched to \(conv.title). Summarize where we left off in two sentences."
+                    )
+                    completion()
+                }
+            }
+            return item
+        }
+
+        let section = CPListSection(items: items, header: "Saved Threads (\(convs.count))", sectionIndexTitle: nil)
+        let template = CPListTemplate(title: "History", sections: [section])
+        template.tabTitle = "History"
+        template.tabImage = UIImage(systemName: "clock.arrow.circlepath")
         return template
     }
 }

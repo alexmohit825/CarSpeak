@@ -12,9 +12,10 @@ import UIKit
 /// 3. Zero Self-Talk & Zero Noise Cutoff:
 ///    The microphone is acoustically gated during AI speech playback so road noise, bumps, and car speaker
 ///    bleed NEVER cause the AI to interrupt itself or speak over itself.
-/// 4. 5G Tower-to-Tower Handoff Resilience:
-///    - Survives cellular baseband migrations via session resumption tokens (`sessionResumption`).
-///    - If a cell tower hop interrupts the socket, turns are buffered and drained cleanly upon reconnect.
+/// 4. 5G Tower-to-Tower Resilience with Audio Speech Fallback:
+///    - If WebSocket drops during a cellular radio switch, turns are automatically spoken aloud
+///      via `speakUtteranceFallback` on-device, guaranteeing ZERO audio black holes.
+///    - Stale session resumption handles are immediately purged to prevent reconnection death loops.
 final class GeminiLiveSessionManager: NSObject, ObservableObject {
     static let shared = GeminiLiveSessionManager()
 
@@ -54,7 +55,7 @@ final class GeminiLiveSessionManager: NSObject, ObservableObject {
     }
 
     private func setupAudioAndHandoffCallbacks() {
-        // 1. Hook up the on-device "Over" Turn-Taking Engine:
+        // 1. Hook up the self-healing "Over" Turn-Taking Engine:
         audioEngine.speechTranscriber.onTurnCompleted = { [weak self] recognizedTurn in
             guard let self = self, self.isLiveSessionActive else { return }
             Task { @MainActor in
@@ -72,13 +73,14 @@ final class GeminiLiveSessionManager: NSObject, ObservableObject {
             }
         }
 
-        // 3. Network interface observer: heals if returning from an offline blackout
+        // 3. Network interface observer: heals cleanly upon returning from an offline blackout
         handoffMonitor.onProactiveHandoffDetected = { [weak self] newInterface in
             guard let self = self else { return }
             self.telemetry.networkInterface = newInterface
             self.telemetry.towerHandoffCount += 1
             if self.isLiveSessionActive && (self.webSocketTask == nil || !self.isSetupComplete) {
-                self.reconnectLiveSocket(isResuming: true)
+                self.resumptionHandle = nil
+                self.reconnectLiveSocket(isResuming: false)
             }
         }
     }
@@ -166,7 +168,7 @@ final class GeminiLiveSessionManager: NSObject, ObservableObject {
         if isSetupComplete, webSocketTask != nil {
             injectContextMessageIntoLiveSession(role: "user", text: trimmed, turnComplete: true)
         } else {
-            // Socket was briefly reconnecting during a 5G cell tower switch; use REST fallback
+            // Socket was briefly reconnecting during a 5G cell tower switch; use spoken REST fallback
             await sendTurnViaRESTFallback(trimmed)
         }
     }
@@ -201,7 +203,9 @@ final class GeminiLiveSessionManager: NSObject, ObservableObject {
                 await MainActor.run {
                     self.liveModelTranscript = reply
                     self.pendingModelTranscriptBuffer = reply
-                    self.connectionStatusText = "Listening • Say 'Over' or Tap"
+                    self.connectionStatusText = "Speaking..."
+                    // Speak the response aloud so there is NEVER an audio black hole!
+                    self.audioEngine.speakUtteranceFallback(reply)
                     self.commitTurnToVault()
                 }
             }
@@ -257,11 +261,26 @@ final class GeminiLiveSessionManager: NSObject, ObservableObject {
         req.httpBody = try? JSONSerialization.data(withJSONObject: reqBody)
 
         do {
-            let (data, _) = try await URLSession.shared.data(for: req)
+            let (data, resp) = try await URLSession.shared.data(for: req)
+            if let httpResp = resp as? HTTPURLResponse, httpResp.statusCode >= 400 {
+                // If resumption handle caused an error, clear it immediately and retry fresh
+                if isResuming {
+                    print("[GeminiLiveSessionManager] Resumption failed (\(httpResp.statusCode)), clearing token and falling back to clean session")
+                    self.resumptionHandle = nil
+                    await connectLiveWebSocket(isResuming: false)
+                    return
+                }
+            }
+
             guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let wsUrlString = json["wsUrl"] as? String,
                   let wsURL = URL(string: wsUrlString),
                   let setupPayload = json["setupPayload"] as? [String: Any] else {
+                if isResuming {
+                    self.resumptionHandle = nil
+                    await connectLiveWebSocket(isResuming: false)
+                    return
+                }
                 await MainActor.run {
                     self.connectionStatusText = "Live Gateway Busy — Retrying..."
                     self.telemetry.connectionState = "Retrying"
@@ -288,13 +307,15 @@ final class GeminiLiveSessionManager: NSObject, ObservableObject {
             receiveNextWebSocketMessage()
         } catch {
             print("[GeminiLiveSessionManager] Connection error: \(error.localizedDescription)")
+            // Clear resumption handle on error to prevent retry loops
+            self.resumptionHandle = nil
             await MainActor.run {
                 self.connectionStatusText = "Reconnecting 5G..."
                 self.telemetry.connectionState = "Reconnecting"
             }
             try? await Task.sleep(nanoseconds: 1_000_000_000)
             if self.isLiveSessionActive {
-                self.reconnectLiveSocket(isResuming: isResuming)
+                self.reconnectLiveSocket(isResuming: false)
             }
         }
     }
@@ -323,7 +344,9 @@ final class GeminiLiveSessionManager: NSObject, ObservableObject {
             case .failure(let error):
                 print("[GeminiLiveSessionManager] Socket receive error: \(error.localizedDescription)")
                 if self.isLiveSessionActive && !self.isReconnecting {
-                    self.reconnectLiveSocket(isResuming: true)
+                    // Always clear resumptionHandle upon disconnect to guarantee a clean reconnect
+                    self.resumptionHandle = nil
+                    self.reconnectLiveSocket(isResuming: false)
                 }
             }
         }
@@ -355,7 +378,7 @@ final class GeminiLiveSessionManager: NSObject, ObservableObject {
             return
         }
 
-        // 1. Session Resumption Handle Update (Survives 5G cell tower handoffs seamlessly)
+        // 1. Session Resumption Handle Update
         if let resumptionUpdate = json["sessionResumptionUpdate"] as? [String: Any],
            let newHandle = resumptionUpdate["newHandle"] as? String, !newHandle.isEmpty {
             self.resumptionHandle = newHandle
@@ -363,7 +386,8 @@ final class GeminiLiveSessionManager: NSObject, ObservableObject {
 
         // 2. Proactive GoAway signal before periodic server-side connection rollover
         if json["goAway"] != nil {
-            self.reconnectLiveSocket(isResuming: true)
+            self.resumptionHandle = nil
+            self.reconnectLiveSocket(isResuming: false)
             return
         }
 
@@ -513,7 +537,8 @@ final class GeminiLiveSessionManager: NSObject, ObservableObject {
                     print("[GeminiLiveSessionManager] Ping failed: \(error.localizedDescription)")
                     DispatchQueue.main.async {
                         if self.isLiveSessionActive && !self.isReconnecting {
-                            self.reconnectLiveSocket(isResuming: true)
+                            self.resumptionHandle = nil
+                            self.reconnectLiveSocket(isResuming: false)
                         }
                     }
                 }

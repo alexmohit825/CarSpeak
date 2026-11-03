@@ -6,16 +6,19 @@ import UIKit
 ///
 /// Engineering Pillars:
 /// 1. True Full-Duplex Neural Audio: Plays streaming 24kHz PCM from Gemini Live via `AVAudioPlayerNode`
-///    while simultaneously capturing from the iPhone's onboard beamforming microphone.
+///    while capturing from the iPhone's onboard beamforming microphone.
 /// 2. Car Stereo Bluetooth A2DP & AirPlay Routing:
 ///    Explicitly routes input to `.builtInMic` and output to `.allowBluetoothA2DP`, preventing the vehicle
 ///    head-unit from entering muted or low-fidelity telephone HFP mode!
 /// 3. Hardware Acoustic Echo Cancellation (`VoiceProcessingIO`):
 ///    Enables Apple's built-in `setVoiceProcessingEnabled(true)` on `inputNode`.
-/// 4. Acoustic Gating & "Over" Turn-Taking Engine:
-///    Delegates to `CabinSpeechTranscriber` for on-device Apple Neural Engine speech recognition.
-///    Gated during AI playback so the AI never hears its own speech and NEVER speaks over itself.
-final class CabinAudioEngine: NSObject, ObservableObject {
+/// 4. Self-Healing Rolling Speech Transcription:
+///    Delegates to `CabinSpeechTranscriber` for on-device Apple Neural Engine transcription with automatic
+///    task recycling, eliminating the 60-second execution wall.
+/// 5. Zero-Silence Fallback Speech Synthesizer:
+///    If cellular radio hops towers during a turn, `speakUtteranceFallback` speaks the response using
+///    an enhanced on-device neural voice, guaranteeing zero audio black holes.
+final class CabinAudioEngine: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     @Published var isCapturing: Bool = false
     @Published var isMuted: Bool = false
     @Published var inputLevel: Float = 0.0
@@ -23,6 +26,7 @@ final class CabinAudioEngine: NSObject, ObservableObject {
 
     private let audioEngine = AVAudioEngine()
     private let playerNode = AVAudioPlayerNode()
+    private let fallbackSynthesizer = AVSpeechSynthesizer()
     let speechTranscriber = CabinSpeechTranscriber()
 
     /// Standard 32-bit Float non-interleaved 24kHz mono format required by iOS AVAudioPlayerNode & AVAudioMixerNode
@@ -52,13 +56,14 @@ final class CabinAudioEngine: NSObject, ObservableObject {
 
     var isAISpeakingOrInTail: Bool {
         bufferLock.lock()
-        let active = activeScheduledBuffers > 0 || isPlayingOutput
+        let active = activeScheduledBuffers > 0 || isPlayingOutput || fallbackSynthesizer.isSpeaking
         bufferLock.unlock()
         return active
     }
 
     override init() {
         super.init()
+        fallbackSynthesizer.delegate = self
         setupAudioSessionObservers()
     }
 
@@ -84,6 +89,7 @@ final class CabinAudioEngine: NSObject, ObservableObject {
 
         if type == .began {
             playerNode.pause()
+            fallbackSynthesizer.pauseSpeaking(at: .immediate)
             if audioEngine.isRunning {
                 audioEngine.pause()
             }
@@ -91,6 +97,7 @@ final class CabinAudioEngine: NSObject, ObservableObject {
             if shouldBeCapturing {
                 ensureEngineRunning()
                 playerNode.play()
+                fallbackSynthesizer.continueSpeaking()
             }
         }
     }
@@ -158,9 +165,6 @@ final class CabinAudioEngine: NSObject, ObservableObject {
     private func configureAudioSessionAndStart() {
         let session = AVAudioSession.sharedInstance()
         do {
-            // Configure high-definition stereo playback with voiceChat mode for hardware echo cancellation.
-            // Using .allowBluetoothA2DP + .defaultToSpeaker prevents the vehicle head-unit from muting
-            // or downgrading audio to 8kHz telephone mode!
             let options: AVAudioSession.CategoryOptions = [
                 .allowBluetoothA2DP,
                 .allowAirPlay,
@@ -168,10 +172,8 @@ final class CabinAudioEngine: NSObject, ObservableObject {
             ]
             try session.setCategory(.playAndRecord, mode: .voiceChat, options: options)
             try session.setPreferredSampleRate(24000)
-            try session.setPreferredIOBufferDuration(0.02) // 20ms low-latency buffer
+            try session.setPreferredIOBufferDuration(0.02)
 
-            // Route recording input specifically to the iPhone's mounted studio beamforming microphone.
-            // This bypasses the car's restricted Bluetooth mic bus entirely and eliminates head-unit audio routing conflicts!
             if let builtInMic = session.availableInputs?.first(where: { $0.portType == .builtInMic }) {
                 try session.setPreferredInput(builtInMic)
             }
@@ -192,8 +194,6 @@ final class CabinAudioEngine: NSObject, ObservableObject {
 
         let inputNode = audioEngine.inputNode
 
-        // Hardware Voice Processing (Acoustic Echo Cancellation):
-        // Automatically cancels audio coming out of the car speakers from the cabin microphone input!
         do {
             try inputNode.setVoiceProcessingEnabled(true)
         } catch {
@@ -255,7 +255,6 @@ final class CabinAudioEngine: NSObject, ObservableObject {
             guard error == nil, floatBuffer.frameLength > 0,
                   let floatData = floatBuffer.floatChannelData?[0] else { return }
 
-            // Convert Float32 [-1.0, 1.0] -> 16-bit Linear PCM for Gemini Live WebSocket
             let frames = Int(floatBuffer.frameLength)
             var pcm16Data = Data(count: frames * MemoryLayout<Int16>.size)
             pcm16Data.withUnsafeMutableBytes { rawBytes in
@@ -362,7 +361,43 @@ final class CabinAudioEngine: NSObject, ObservableObject {
         }
     }
 
-    // MARK: - 3. Seamless Natural Barge-In / Interruption
+    // MARK: - 3. Zero-Silence Fallback Speech Synthesizer
+
+    func speakUtteranceFallback(_ text: String) {
+        fallbackSynthesizer.stopSpeaking(at: .immediate)
+        let utterance = AVSpeechUtterance(string: text)
+        if let voice = AVSpeechSynthesisVoice(identifier: "com.apple.voice.enhanced.en-US.Evan") ??
+                       AVSpeechSynthesisVoice(identifier: "com.apple.voice.enhanced.en-US.Ava") ??
+                       AVSpeechSynthesisVoice(language: "en-US") {
+            utterance.voice = voice
+        }
+        utterance.rate = 0.52
+        utterance.pitchMultiplier = 1.0
+
+        DispatchQueue.main.async {
+            self.isPlayingOutput = true
+            self.speechTranscriber.setPlaybackGating(true)
+        }
+
+        fallbackSynthesizer.speak(utterance)
+    }
+
+    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
+        DispatchQueue.main.async {
+            self.isPlayingOutput = false
+            self.speechTranscriber.setPlaybackGating(false)
+            AcousticEarcons.shared.play(.sessionReady)
+        }
+    }
+
+    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {
+        DispatchQueue.main.async {
+            self.isPlayingOutput = false
+            self.speechTranscriber.setPlaybackGating(false)
+        }
+    }
+
+    // MARK: - 4. Seamless Natural Barge-In / Interruption
 
     func interruptPlaybackImmediately() {
         bufferLock.lock()
@@ -372,6 +407,7 @@ final class CabinAudioEngine: NSObject, ObservableObject {
 
         playerNode.stop()
         playerNode.play()
+        fallbackSynthesizer.stopSpeaking(at: .immediate)
 
         DispatchQueue.main.async {
             self.isPlayingOutput = false
@@ -381,6 +417,7 @@ final class CabinAudioEngine: NSObject, ObservableObject {
     }
 
     func toggleMute() {
+        // Safe toggle
         isMuted.toggle()
         AcousticEarcons.shared.play(isMuted ? .micMuted : .micUnmuted)
     }

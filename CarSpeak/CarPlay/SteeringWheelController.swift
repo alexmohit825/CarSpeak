@@ -3,7 +3,7 @@ import MediaPlayer
 import UIKit
 
 /// Integrates CarSpeak with the CarPlay "Now Playing" Dashboard (`CPNowPlayingTemplate`)
-/// and Physical Steering Wheel Buttons, matching the proven `Hands-Free Lingo` MediaPlayer setup.
+/// and Physical Steering Wheel Buttons without introducing muting race conditions.
 final class SteeringWheelController {
     static let shared = SteeringWheelController()
 
@@ -19,13 +19,16 @@ final class SteeringWheelController {
 
         let commandCenter = MPRemoteCommandCenter.shared()
 
-        // Steering Wheel Play/Pause -> Toggle Cabin Mic Mute/Unmute or Start Loop
+        // Steering Wheel Play/Pause -> Interrupt AI if speaking, or Send Current Spoken Turn
         commandCenter.togglePlayPauseCommand.isEnabled = true
         commandCenter.togglePlayPauseCommand.addTarget { _ in
-            if !GeminiLiveSessionManager.shared.isLiveSessionActive {
-                GeminiLiveSessionManager.shared.startHandsFreeSession(forceRestartAudio: true)
+            let manager = GeminiLiveSessionManager.shared
+            if manager.audioEngine.isPlayingOutput {
+                manager.audioEngine.interruptPlaybackImmediately()
+            } else if !manager.isLiveSessionActive {
+                manager.startHandsFreeSession()
             } else {
-                GeminiLiveSessionManager.shared.audioEngine.toggleMute()
+                manager.audioEngine.speechTranscriber.forceSubmitCurrentTranscript()
             }
             self.updateNowPlayingDashboard()
             return .success
@@ -33,12 +36,13 @@ final class SteeringWheelController {
 
         commandCenter.playCommand.isEnabled = true
         commandCenter.playCommand.addTarget { _ in
-            if !GeminiLiveSessionManager.shared.isLiveSessionActive {
-                GeminiLiveSessionManager.shared.startHandsFreeSession(forceRestartAudio: true)
-            } else if GeminiLiveSessionManager.shared.audioEngine.isMuted {
-                GeminiLiveSessionManager.shared.audioEngine.toggleMute()
+            let manager = GeminiLiveSessionManager.shared
+            if manager.audioEngine.isPlayingOutput {
+                manager.audioEngine.interruptPlaybackImmediately()
+            } else if !manager.isLiveSessionActive {
+                manager.startHandsFreeSession()
             } else {
-                GeminiLiveSessionManager.shared.startHandsFreeSession(forceRestartAudio: true)
+                manager.audioEngine.speechTranscriber.forceSubmitCurrentTranscript()
             }
             self.updateNowPlayingDashboard()
             return .success
@@ -46,7 +50,10 @@ final class SteeringWheelController {
 
         commandCenter.pauseCommand.isEnabled = true
         commandCenter.pauseCommand.addTarget { _ in
-            GeminiLiveSessionManager.shared.audioEngine.toggleMute()
+            let manager = GeminiLiveSessionManager.shared
+            if manager.audioEngine.isPlayingOutput {
+                manager.audioEngine.interruptPlaybackImmediately()
+            }
             self.updateNowPlayingDashboard()
             return .success
         }
@@ -77,13 +84,13 @@ final class SteeringWheelController {
         var info: [String: Any] = [:]
         let latestText = !manager.liveModelTranscript.isEmpty
             ? String(manager.liveModelTranscript.prefix(64))
-            : (activeConv?.title ?? "CarSpeak Hands-Free AI")
+            : (activeConv?.title ?? "CarSpeak Continuous AI")
         info[MPMediaItemPropertyTitle] = latestText
         info[MPMediaItemPropertyArtist] = "CarSpeak • \(manager.currentPersona.displayName)"
         info[MPMediaItemPropertyAlbumTitle] = "AG Project: \(activeConv?.projectName ?? "All 56 Projects")"
         info[MPMediaItemPropertyPlaybackDuration] = max(1.0, duration)
         info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = elapsed
-        info[MPNowPlayingInfoPropertyPlaybackRate] = (isSpeaking || manager.isLiveSessionActive) && !manager.audioEngine.isMuted ? 1.0 : 0.0
+        info[MPNowPlayingInfoPropertyPlaybackRate] = (isSpeaking || manager.isLiveSessionActive) ? 1.0 : 0.0
         info[MPNowPlayingInfoPropertyMediaType] = MPNowPlayingInfoMediaType.audio.rawValue
 
         MPNowPlayingInfoCenter.default().nowPlayingInfo = info

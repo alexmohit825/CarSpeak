@@ -215,10 +215,19 @@ struct CockpitView: View {
             }
             .buttonStyle(.plain)
 
-            Text(session.connectionStatusText)
-                .font(.subheadline.weight(.bold))
-                .foregroundStyle(Color(red: 0.07, green: 0.09, blue: 0.15))
-                .multilineTextAlignment(.center)
+            if audio.isMuted {
+                Text("🔇 MICROPHONE MUTED • TAP UNMUTE TO RESUME")
+                    .font(.caption.weight(.heavy))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 7)
+                    .background(Color(red: 0.85, green: 0.15, blue: 0.15), in: Capsule())
+            } else {
+                Text(session.connectionStatusText)
+                    .font(.subheadline.weight(.bold))
+                    .foregroundStyle(Color(red: 0.07, green: 0.09, blue: 0.15))
+                    .multilineTextAlignment(.center)
+            }
 
             HStack(spacing: 10) {
                 Button {
