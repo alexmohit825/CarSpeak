@@ -64,8 +64,16 @@ final class CabinAudioEngine: NSObject, ObservableObject, AVSpeechSynthesizerDel
     override init() {
         super.init()
         fallbackSynthesizer.delegate = self
+        ensurePlayerNodeConnected()
         setupAudioSessionObservers()
         refreshRouteDiagnostics()
+    }
+
+    private func ensurePlayerNodeConnected() {
+        if !audioEngine.attachedNodes.contains(playerNode) {
+            audioEngine.attach(playerNode)
+            audioEngine.connect(playerNode, to: audioEngine.mainMixerNode, format: playbackFormat)
+        }
     }
 
     private func setupAudioSessionObservers() {
@@ -222,10 +230,7 @@ final class CabinAudioEngine: NSObject, ObservableObject, AVSpeechSynthesizerDel
     }
 
     private func attachAndStartNodes() {
-        if !audioEngine.attachedNodes.contains(playerNode) {
-            audioEngine.attach(playerNode)
-            audioEngine.connect(playerNode, to: audioEngine.mainMixerNode, format: playbackFormat)
-        }
+        ensurePlayerNodeConnected()
 
         let inputNode = audioEngine.inputNode
         do {
@@ -371,8 +376,19 @@ final class CabinAudioEngine: NSObject, ObservableObject, AVSpeechSynthesizerDel
     private func scheduleCoalescedPCM24k(_ data: Data) {
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
+            self.ensurePlayerNodeConnected()
             if !self.audioEngine.isRunning {
-                self.ensureEngineRunning()
+                if self.shouldBeCapturing {
+                    self.ensureEngineRunning()
+                } else {
+                    self.audioEngine.prepare()
+                    try? self.audioEngine.start()
+                    self.playerNode.play()
+                }
+            }
+            guard self.playerNode.outputFormat(forBus: 0).channelCount == self.playbackFormat.channelCount else {
+                self.lastAudioError = "Playback channel mismatch"
+                return
             }
 
             let sampleCount = data.count / MemoryLayout<Int16>.size
