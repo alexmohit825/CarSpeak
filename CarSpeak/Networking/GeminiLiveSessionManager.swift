@@ -116,7 +116,7 @@ final class GeminiLiveSessionManager: NSObject, ObservableObject {
         isSetupComplete = false
         shouldSendGreetingOnSetup = false
         stopPingTimer()
-        _ = outboxBuffer.drainAll()
+        outboxBuffer.clear()
 
         webSocketTask?.cancel(with: .normalClosure, reason: nil)
         webSocketTask = nil
@@ -173,12 +173,15 @@ final class GeminiLiveSessionManager: NSObject, ObservableObject {
     }
 
     private func drainOutboxBuffer(over ws: URLSessionWebSocketTask) {
-        let frames = outboxBuffer.drainAll()
+        let frames = outboxBuffer.drainPendingFrames()
         for frame in frames {
-            sendRealtimeAudioChunk(frame, over: ws)
+            if let pcmData = Data(base64Encoded: frame.base64PCM16) {
+                sendRealtimeAudioChunk(pcmData, over: ws)
+                outboxBuffer.markSent(sequenceId: frame.sequenceId)
+            }
         }
         DispatchQueue.main.async {
-            self.telemetry.bufferedFramesCount = 0
+            self.telemetry.bufferedFramesCount = self.outboxBuffer.pendingCount
         }
     }
 

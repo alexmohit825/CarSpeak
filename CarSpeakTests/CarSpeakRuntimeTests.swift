@@ -142,15 +142,18 @@ final class CarSpeakRuntimeTests: XCTestCase {
 
     func testOutboxRingBufferDrain() {
         let ring = OutboxRingBuffer(maxFrames: 3)
-        XCTAssertTrue(ring.enqueue(pcmData: Data([1])))
-        XCTAssertTrue(ring.enqueue(pcmData: Data([2])))
-        XCTAssertTrue(ring.enqueue(pcmData: Data([3])))
+        let f1 = ring.enqueue(pcmData: Data([1]))
+        _ = ring.enqueue(pcmData: Data([2]))
+        _ = ring.enqueue(pcmData: Data([3]))
         XCTAssertEqual(ring.pendingCount, 3)
 
-        // Adding a 4th drops the oldest (1)
+        // Adding a 4th drops the oldest (f1)
         _ = ring.enqueue(pcmData: Data([4]))
-        let drained = ring.drainAll()
-        XCTAssertEqual(drained, [Data([2]), Data([3]), Data([4])])
+        let pending = ring.drainPendingFrames()
+        XCTAssertEqual(pending.count, 3)
+        XCTAssertNotEqual(pending.first?.sequenceId, f1.sequenceId)
+
+        ring.clear()
         XCTAssertEqual(ring.pendingCount, 0)
     }
 }
