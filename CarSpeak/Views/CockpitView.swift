@@ -4,7 +4,6 @@ struct CockpitView: View {
     @ObservedObject var session = GeminiLiveSessionManager.shared
     @ObservedObject var vault = ConversationVaultClient.shared
     @ObservedObject var audio = GeminiLiveSessionManager.shared.audioEngine
-    @ObservedObject var speech = GeminiLiveSessionManager.shared.audioEngine.speechTranscriber
     @State private var selectedProjectName: String = ""
     @State private var commandInput: String = ""
 
@@ -27,6 +26,7 @@ struct CockpitView: View {
                         headerBadgeRow
                         projectDropdownCard
                         voiceOrbCard
+                        blackBoxDiagnosticsCard
                         liveSpokenBubbleCard
                         latestTurnCard
                         bottomComposerBar
@@ -178,12 +178,7 @@ struct CockpitView: View {
                     // Tap to interrupt AI speech immediately
                     audio.interruptPlaybackImmediately()
                 } else if isCapturing {
-                    // If Dr. Mohit has spoken text, force send turn immediately
-                    if !speech.liveTranscript.isEmpty {
-                        speech.forceSubmitCurrentTranscript()
-                    } else {
-                        session.stopHandsFreeSession()
-                    }
+                    session.stopHandsFreeSession()
                 } else {
                     session.startHandsFreeSession()
                 }
@@ -206,7 +201,7 @@ struct CockpitView: View {
                             .font(.system(size: 44, weight: .bold))
                             .foregroundStyle(.white)
 
-                        Text(isSpeaking ? "TAP TO STOP" : (isCapturing ? "SAY 'OVER' OR TAP" : "TAP TO START"))
+                        Text(isSpeaking ? "TAP TO STOP" : (isCapturing ? "LIVE • SPEAK NATURALLY" : "TAP TO START"))
                             .font(.caption2.weight(.heavy))
                             .foregroundStyle(.white)
                             .tracking(0.5)
@@ -288,28 +283,63 @@ struct CockpitView: View {
         .shadow(color: Color.black.opacity(0.05), radius: 16, y: 6)
     }
 
-    // MARK: - 4. Live Spoken Bubble (While Dr. Mohit is talking)
+    // MARK: - 3.5 In-Car Black-Box Diagnostics
+
+    @ViewBuilder
+    private var blackBoxDiagnosticsCard: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("BLACK-BOX TELEMETRY")
+                .font(.caption2.weight(.heavy))
+                .foregroundStyle(Color(red: 0.31, green: 0.27, blue: 0.90))
+
+            HStack {
+                Text("Route: \(audio.activeInputRoute) → \(audio.activeOutputRoute)")
+                Spacer()
+                Text(String(format: "RMS: %.2f", audio.inputLevel))
+            }
+            .font(.caption.monospaced())
+            .foregroundStyle(Color(red: 0.07, green: 0.09, blue: 0.15))
+
+            HStack {
+                Text("Sent: \(session.sentAudioFramesCount) frames")
+                Spacer()
+                Text("Recv: \(session.receivedAudioBytesCount / 1024) KB")
+            }
+            .font(.caption.monospaced())
+            .foregroundStyle(Color(red: 0.06, green: 0.50, blue: 0.36))
+
+            if audio.lastAudioError != "None" || session.lastSocketError != "None" {
+                Text("Err: audio=\(audio.lastAudioError) | ws=\(session.lastSocketError)")
+                    .font(.caption2.monospaced())
+                    .foregroundStyle(Color(red: 0.80, green: 0.12, blue: 0.12))
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.white.opacity(0.92), in: RoundedRectangle(cornerRadius: 14))
+        .overlay(
+            RoundedRectangle(cornerRadius: 14)
+                .stroke(Color(red: 0.31, green: 0.27, blue: 0.90).opacity(0.20), lineWidth: 1)
+        )
+    }
+
+    // MARK: - 4. Live Spoken Bubble (Gemini Live inputTranscription)
 
     @ViewBuilder
     private var liveSpokenBubbleCard: some View {
-        if !speech.liveTranscript.isEmpty {
+        if !session.liveUserTranscript.isEmpty {
             VStack(alignment: .leading, spacing: 6) {
                 HStack {
                     Image(systemName: "mic.fill")
                         .font(.caption.weight(.bold))
-                    Text("Hearing You (Say 'Over' to Finish)")
+                    Text("Gemini Heard You")
                         .font(.caption2.weight(.heavy))
                         .tracking(0.5)
                     Spacer()
-                    Button("Send Now") {
-                        speech.forceSubmitCurrentTranscript()
-                    }
-                    .font(.caption2.weight(.bold))
-                    .foregroundStyle(Color(red: 0.06, green: 0.73, blue: 0.51))
                 }
                 .foregroundStyle(Color(red: 0.06, green: 0.73, blue: 0.51))
 
-                Text(speech.liveTranscript)
+                Text(session.liveUserTranscript)
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(Color(red: 0.07, green: 0.09, blue: 0.15))
                     .frame(maxWidth: .infinity, alignment: .leading)

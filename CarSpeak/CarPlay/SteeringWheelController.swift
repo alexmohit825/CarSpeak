@@ -28,7 +28,7 @@ final class SteeringWheelController {
             } else if !manager.isLiveSessionActive {
                 manager.startHandsFreeSession()
             } else {
-                manager.audioEngine.speechTranscriber.forceSubmitCurrentTranscript()
+                manager.audioEngine.toggleMute()
             }
             self.updateNowPlayingDashboard()
             return .success
@@ -42,7 +42,7 @@ final class SteeringWheelController {
             } else if !manager.isLiveSessionActive {
                 manager.startHandsFreeSession()
             } else {
-                manager.audioEngine.speechTranscriber.forceSubmitCurrentTranscript()
+                manager.audioEngine.toggleMute()
             }
             self.updateNowPlayingDashboard()
             return .success

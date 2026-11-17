@@ -40,3 +40,25 @@ targets:
         INFOPLIST_FILE: CarSpeak/Info.plist
         CODE_SIGN_ENTITLEMENTS: CarSpeak/CarSpeak.entitlements
         TARGETED_DEVICE_FAMILY: "1,2"
+
+  CarSpeakTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: CarSpeakTests
+    dependencies:
+      - target: CarSpeak
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.AlexMohit.CarSpeakTests
+        GENERATE_INFOPLIST_FILE: YES
+
+schemes:
+  CarSpeak:
+    build:
+      targets:
+        CarSpeak: all
+        CarSpeakTests: [test]
+    test:
+      targets:
+        - CarSpeakTests

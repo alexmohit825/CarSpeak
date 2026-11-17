@@ -2,20 +2,18 @@ import Foundation
 import Combine
 import UIKit
 
-/// SOTA Full-Duplex Gemini Live Conversational Engine for CarSpeak.
+/// Path A: Native Full-Duplex Gemini Live Conversational Engine for CarSpeak.
 ///
-/// Engineering Guarantees:
-/// 1. True Human Neural Speech: Streams 24kHz raw PCM from Gemini Live (`BidiGenerateContent`)
-///    with expressive human neural voices (`Puck`, `Aoede`, `Fenrir`, `Charon`).
-/// 2. Deterministic "Over" Turn-Taking Protocol:
-///    Dr. Mohit can speak as long as he needs. Saying "...over" or pausing triggers immediate turn submission.
-/// 3. Zero Self-Talk & Zero Noise Cutoff:
-///    The microphone is acoustically gated during AI speech playback so road noise, bumps, and car speaker
-///    bleed NEVER cause the AI to interrupt itself or speak over itself.
-/// 4. 5G Tower-to-Tower Resilience with Audio Speech Fallback:
-///    - If WebSocket drops during a cellular radio switch, turns are automatically spoken aloud
-///      via `speakUtteranceFallback` on-device, guaranteeing ZERO audio black holes.
-///    - Stale session resumption handles are immediately purged to prevent reconnection death loops.
+/// Architecture (Zero SFSpeechRecognizer):
+/// 1. Direct 16kHz PCM Streaming (`realtimeInput.audio`):
+///    Streams captured microphone audio directly over the Gemini Live WebSocket.
+///    During brief 5G tower reconnects, chunks buffer in `OutboxRingBuffer` and flush on `setupComplete`.
+/// 2. Native Server-Side VAD & Barge-In:
+///    Gemini Live detects speech boundaries, transcribes via `inputTranscription`, and sends
+///    `interrupted: true` if Dr. Mohit speaks over a response.
+/// 3. Streaming 24kHz Neural Audio Output (`Puck`, `Fenrir`, `Charon`, `Aoede`).
+/// 4. In-Car Black-Box Diagnostics:
+///    Publishes `sentAudioFramesCount`, `receivedAudioBytesCount`, and `lastSocketError` live.
 final class GeminiLiveSessionManager: NSObject, ObservableObject {
     static let shared = GeminiLiveSessionManager()
 
@@ -27,6 +25,11 @@ final class GeminiLiveSessionManager: NSObject, ObservableObject {
     @Published var telemetry = HandoffTelemetry()
     @Published var isProcessingCommand: Bool = false
 
+    // Black-Box Telemetry
+    @Published var sentAudioFramesCount: Int = 0
+    @Published var receivedAudioBytesCount: Int = 0
+    @Published var lastSocketError: String = "None"
+
     let audioEngine = CabinAudioEngine()
     let handoffMonitor = CellularHandoffMonitor()
     let vault = ConversationVaultClient.shared
@@ -36,7 +39,7 @@ final class GeminiLiveSessionManager: NSObject, ObservableObject {
     private var urlSession: URLSession!
     private var resumptionHandle: String?
     private var isReconnecting: Bool = false
-    private var isSetupComplete: Bool = false
+    private(set) var isSetupComplete: Bool = false
     private var shouldSendGreetingOnSetup: Bool = false
     private var lastReconnectTimestamp: Date = .distantPast
     private var pendingUserTranscriptBuffer: String = ""
@@ -55,25 +58,21 @@ final class GeminiLiveSessionManager: NSObject, ObservableObject {
     }
 
     private func setupAudioAndHandoffCallbacks() {
-        // 1. Hook up the self-healing "Over" Turn-Taking Engine:
-        audioEngine.speechTranscriber.onTurnCompleted = { [weak self] recognizedTurn in
-            guard let self = self, self.isLiveSessionActive else { return }
-            Task { @MainActor in
-                await self.handleCompletedUserTurn(recognizedTurn)
-            }
-        }
-
-        // 2. Real-time microphone audio chunk buffer for handoff resilience
+        // 1. Direct 16kHz PCM audio stream -> Gemini Live realtimeInput.audio
         audioEngine.onPCM16ChunkCaptured = { [weak self] pcmData in
             guard let self = self, self.isLiveSessionActive else { return }
 
-            _ = self.outboxBuffer.enqueue(pcmData: pcmData)
-            DispatchQueue.main.async {
-                self.telemetry.bufferedFramesCount = self.outboxBuffer.pendingCount
+            if self.isSetupComplete, let ws = self.webSocketTask {
+                self.sendRealtimeAudioChunk(pcmData, over: ws)
+            } else {
+                _ = self.outboxBuffer.enqueue(pcmData: pcmData)
+                DispatchQueue.main.async {
+                    self.telemetry.bufferedFramesCount = self.outboxBuffer.pendingCount
+                }
             }
         }
 
-        // 3. Network interface observer: heals cleanly upon returning from an offline blackout
+        // 2. Network interface observer: heals cleanly upon returning from an offline blackout
         handoffMonitor.onProactiveHandoffDetected = { [weak self] newInterface in
             guard let self = self else { return }
             self.telemetry.networkInterface = newInterface
@@ -98,6 +97,9 @@ final class GeminiLiveSessionManager: NSObject, ObservableObject {
         isLiveSessionActive = true
         isSetupComplete = false
         shouldSendGreetingOnSetup = true
+        sentAudioFramesCount = 0
+        receivedAudioBytesCount = 0
+        lastSocketError = "None"
         connectionStatusText = "Connecting Gemini Live..."
         telemetry.connectionState = "Connecting"
         audioEngine.startCabinDuplexStream()
@@ -114,6 +116,7 @@ final class GeminiLiveSessionManager: NSObject, ObservableObject {
         isSetupComplete = false
         shouldSendGreetingOnSetup = false
         stopPingTimer()
+        _ = outboxBuffer.drainAll()
 
         webSocketTask?.cancel(with: .normalClosure, reason: nil)
         webSocketTask = nil
@@ -142,14 +145,50 @@ final class GeminiLiveSessionManager: NSObject, ObservableObject {
         }
     }
 
-    // MARK: - 2. "Over" Turn Processing & Gemini Dispatch
+    // MARK: - 2. Real-Time Audio Streaming (`realtimeInput.audio`)
+
+    func sendRealtimeAudioChunk(_ pcmData: Data, over ws: URLSessionWebSocketTask) {
+        let payload: [String: Any] = [
+            "realtimeInput": [
+                "audio": [
+                    "data": pcmData.base64EncodedString(),
+                    "mimeType": "audio/pcm;rate=16000"
+                ]
+            ]
+        ]
+
+        guard let data = try? JSONSerialization.data(withJSONObject: payload),
+              let str = String(data: data, encoding: .utf8) else { return }
+
+        ws.send(.string(str)) { [weak self] error in
+            guard let self = self else { return }
+            DispatchQueue.main.async {
+                if let error = error {
+                    self.lastSocketError = "Send: \(error.localizedDescription)"
+                } else {
+                    self.sentAudioFramesCount += 1
+                }
+            }
+        }
+    }
+
+    private func drainOutboxBuffer(over ws: URLSessionWebSocketTask) {
+        let frames = outboxBuffer.drainAll()
+        for frame in frames {
+            sendRealtimeAudioChunk(frame, over: ws)
+        }
+        DispatchQueue.main.async {
+            self.telemetry.bufferedFramesCount = 0
+        }
+    }
+
+    // MARK: - 3. Explicit Text / Quick Prompt Dispatch
 
     @MainActor
     func handleCompletedUserTurn(_ query: String) async {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
 
-        // System voice commands check
         let lower = trimmed.lowercased()
         if lower == "disconnect" || lower == "goodbye" || lower == "exit" || lower == "stop listening" {
             stopHandsFreeSession()
@@ -168,7 +207,6 @@ final class GeminiLiveSessionManager: NSObject, ObservableObject {
         if isSetupComplete, webSocketTask != nil {
             injectContextMessageIntoLiveSession(role: "user", text: trimmed, turnComplete: true)
         } else {
-            // Socket was briefly reconnecting during a 5G cell tower switch; use spoken REST fallback
             await sendTurnViaRESTFallback(trimmed)
         }
     }
@@ -204,20 +242,19 @@ final class GeminiLiveSessionManager: NSObject, ObservableObject {
                     self.liveModelTranscript = reply
                     self.pendingModelTranscriptBuffer = reply
                     self.connectionStatusText = "Speaking..."
-                    // Speak the response aloud so there is NEVER an audio black hole!
                     self.audioEngine.speakUtteranceFallback(reply)
                     self.commitTurnToVault()
                 }
             }
         } catch {
-            print("[GeminiLiveSessionManager] REST fallback error: \(error.localizedDescription)")
             await MainActor.run {
+                self.lastSocketError = "REST: \(error.localizedDescription)"
                 self.connectionStatusText = "Reconnecting 5G..."
             }
         }
     }
 
-    // MARK: - 3. 5G Tower Handoff Resilience & Reconnect Engine
+    // MARK: - 4. 5G Tower Handoff Resilience & Reconnect Engine
 
     private func reconnectLiveSocket(isResuming: Bool) {
         guard isLiveSessionActive, !isReconnecting else { return }
@@ -237,15 +274,17 @@ final class GeminiLiveSessionManager: NSObject, ObservableObject {
             await MainActor.run {
                 self.telemetry.lastHandoffLatencyMs = elapsedMs
                 self.isReconnecting = false
-                self.connectionStatusText = "Listening • Say 'Over' or Tap"
-                self.telemetry.connectionState = "5G Live Active"
+                if self.isSetupComplete {
+                    self.connectionStatusText = "Live • Speak Naturally"
+                    self.telemetry.connectionState = "5G Live Active"
+                }
             }
         }
     }
 
-    // MARK: - 4. Gemini Live WebSocket Connection & Protocol Handshake
+    // MARK: - 5. Gemini Live WebSocket Connection & Protocol Handshake
 
-    private func connectLiveWebSocket(isResuming: Bool) async {
+    func connectLiveWebSocket(isResuming: Bool) async {
         guard let configURL = URL(string: "\(vault.baseURL)/api/live-session") else { return }
         var req = URLRequest(url: configURL)
         req.httpMethod = "POST"
@@ -263,12 +302,13 @@ final class GeminiLiveSessionManager: NSObject, ObservableObject {
         do {
             let (data, resp) = try await URLSession.shared.data(for: req)
             if let httpResp = resp as? HTTPURLResponse, httpResp.statusCode >= 400 {
-                // If resumption handle caused an error, clear it immediately and retry fresh
                 if isResuming {
-                    print("[GeminiLiveSessionManager] Resumption failed (\(httpResp.statusCode)), clearing token and falling back to clean session")
                     self.resumptionHandle = nil
                     await connectLiveWebSocket(isResuming: false)
                     return
+                }
+                await MainActor.run {
+                    self.lastSocketError = "Gateway HTTP \(httpResp.statusCode)"
                 }
             }
 
@@ -284,6 +324,7 @@ final class GeminiLiveSessionManager: NSObject, ObservableObject {
                 await MainActor.run {
                     self.connectionStatusText = "Live Gateway Busy — Retrying..."
                     self.telemetry.connectionState = "Retrying"
+                    self.lastSocketError = "Invalid /api/live-session JSON"
                 }
                 return
             }
@@ -306,10 +347,9 @@ final class GeminiLiveSessionManager: NSObject, ObservableObject {
 
             receiveNextWebSocketMessage()
         } catch {
-            print("[GeminiLiveSessionManager] Connection error: \(error.localizedDescription)")
-            // Clear resumption handle on error to prevent retry loops
             self.resumptionHandle = nil
             await MainActor.run {
+                self.lastSocketError = "Connect: \(error.localizedDescription)"
                 self.connectionStatusText = "Reconnecting 5G..."
                 self.telemetry.connectionState = "Reconnecting"
             }
@@ -342,9 +382,10 @@ final class GeminiLiveSessionManager: NSObject, ObservableObject {
                     self.receiveNextWebSocketMessage()
                 }
             case .failure(let error):
-                print("[GeminiLiveSessionManager] Socket receive error: \(error.localizedDescription)")
+                DispatchQueue.main.async {
+                    self.lastSocketError = "Recv: \(error.localizedDescription)"
+                }
                 if self.isLiveSessionActive && !self.isReconnecting {
-                    // Always clear resumptionHandle upon disconnect to guarantee a clean reconnect
                     self.resumptionHandle = nil
                     self.reconnectLiveSocket(isResuming: false)
                 }
@@ -356,23 +397,27 @@ final class GeminiLiveSessionManager: NSObject, ObservableObject {
         guard let data = text.data(using: .utf8),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
 
-        // 0. Setup Complete: Gemini Live is ready to talk!
+        // 0. Setup Complete: Gemini Live is ready to stream audio!
         if json["setupComplete"] != nil {
             self.isSetupComplete = true
             AcousticEarcons.shared.play(.sessionReady)
+
+            if let ws = self.webSocketTask {
+                self.drainOutboxBuffer(over: ws)
+            }
 
             if self.shouldSendGreetingOnSetup {
                 self.shouldSendGreetingOnSetup = false
                 let activeTitle = self.vault.activeConversation?.projectName ?? "all 56 Antigravity projects"
                 self.injectContextMessageIntoLiveSession(
                     role: "user",
-                    text: "Greet Dr. Mohit warmly in one natural spoken sentence and confirm that you're ready to discuss \(activeTitle). Remind him he can say 'over' or pause whenever he finishes speaking.",
+                    text: "Greet Dr. Mohit warmly in one brief spoken sentence and confirm you are listening for \(activeTitle).",
                     turnComplete: true
                 )
             }
 
             DispatchQueue.main.async {
-                self.connectionStatusText = "Listening • Say 'Over' or Tap"
+                self.connectionStatusText = "Live • Speak Naturally"
                 self.telemetry.connectionState = "5G Live Active"
             }
             return
@@ -391,7 +436,7 @@ final class GeminiLiveSessionManager: NSObject, ObservableObject {
             return
         }
 
-        // 3. Non-Blocking Voice Tool Calls (Antigravity Project Dossiers & Conversation Switching)
+        // 3. Non-Blocking Voice Tool Calls
         if let toolCall = json["toolCall"] as? [String: Any],
            let functionCalls = toolCall["functionCalls"] as? [[String: Any]] {
             Task {
@@ -399,8 +444,24 @@ final class GeminiLiveSessionManager: NSObject, ObservableObject {
             }
         }
 
-        // 4. Server Content (Real-Time 24kHz Streaming Audio & Transcripts)
+        // 4. Server Content (Real-Time 24kHz Streaming Audio, Input/Output Transcripts, Barge-In)
         if let serverContent = json["serverContent"] as? [String: Any] {
+            if let interrupted = serverContent["interrupted"] as? Bool, interrupted {
+                self.audioEngine.interruptPlaybackImmediately()
+                DispatchQueue.main.async {
+                    self.connectionStatusText = "Listening..."
+                    SteeringWheelController.shared.updateNowPlayingDashboard(isSpeaking: false)
+                }
+            }
+
+            if let inputTrans = serverContent["inputTranscription"] as? [String: Any],
+               let userText = inputTrans["text"] as? String, !userText.isEmpty {
+                pendingUserTranscriptBuffer += userText
+                DispatchQueue.main.async {
+                    self.liveUserTranscript = self.pendingUserTranscriptBuffer
+                }
+            }
+
             if let outputTrans = serverContent["outputTranscription"] as? [String: Any],
                let modelText = outputTrans["text"] as? String, !modelText.isEmpty {
                 pendingModelTranscriptBuffer += modelText
@@ -417,6 +478,9 @@ final class GeminiLiveSessionManager: NSObject, ObservableObject {
                     if let inlineData = part["inlineData"] as? [String: Any],
                        let base64Audio = inlineData["data"] as? String,
                        let audioChunk = Data(base64Encoded: base64Audio) {
+                        DispatchQueue.main.async {
+                            self.receivedAudioBytesCount += audioChunk.count
+                        }
                         self.audioEngine.enqueueLiveOutputPCM24k(audioChunk)
                     }
                 }
@@ -426,7 +490,7 @@ final class GeminiLiveSessionManager: NSObject, ObservableObject {
                 self.audioEngine.flushPlaybackBuffer()
                 self.commitTurnToVault()
                 DispatchQueue.main.async {
-                    self.connectionStatusText = "Listening • Say 'Over' or Tap"
+                    self.connectionStatusText = "Live • Speak Naturally"
                     SteeringWheelController.shared.updateNowPlayingDashboard(isSpeaking: false)
                 }
             }
@@ -493,7 +557,9 @@ final class GeminiLiveSessionManager: NSObject, ObservableObject {
                     ])
                 }
             } catch {
-                print("[GeminiLiveSessionManager] Tool execution error: \(error.localizedDescription)")
+                await MainActor.run {
+                    self.lastSocketError = "Tool: \(error.localizedDescription)"
+                }
             }
         }
 
@@ -526,7 +592,7 @@ final class GeminiLiveSessionManager: NSObject, ObservableObject {
         }
     }
 
-    // MARK: - 5. Heartbeat Ping / Pong
+    // MARK: - 6. Heartbeat Ping / Pong
 
     private func startPingTimer() {
         stopPingTimer()
@@ -534,8 +600,8 @@ final class GeminiLiveSessionManager: NSObject, ObservableObject {
             guard let self = self, let ws = self.webSocketTask, self.isLiveSessionActive else { return }
             ws.sendPing { error in
                 if let error = error {
-                    print("[GeminiLiveSessionManager] Ping failed: \(error.localizedDescription)")
                     DispatchQueue.main.async {
+                        self.lastSocketError = "Ping: \(error.localizedDescription)"
                         if self.isLiveSessionActive && !self.isReconnecting {
                             self.resumptionHandle = nil
                             self.reconnectLiveSocket(isResuming: false)
@@ -551,7 +617,7 @@ final class GeminiLiveSessionManager: NSObject, ObservableObject {
         pingTimer = nil
     }
 
-    // MARK: - 6. Direct Text Composer Dispatch
+    // MARK: - 7. Direct Text Composer Dispatch
 
     @MainActor
     func sendVoiceOrTextCommand(_ command: String) async {

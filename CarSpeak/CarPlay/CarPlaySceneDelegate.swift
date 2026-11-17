@@ -97,8 +97,8 @@ public final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationScene
                 : "Speaking through vehicle audio..."
             statusImageName = "speaker.wave.3.fill"
         } else if manager.isLiveSessionActive {
-            statusTitle = "🎙️ Listening • Say 'Over' or Tap to Send"
-            subtitleText = "Speak naturally. Say 'over' when you finish your thought."
+            statusTitle = "🎙️ Live • Speak Naturally"
+            subtitleText = "In: \(manager.audioEngine.activeInputRoute) • Sent: \(manager.sentAudioFramesCount) frames • Err: \(manager.audioEngine.lastAudioError)"
             statusImageName = "waveform.circle.fill"
         } else {
             statusTitle = "▶️ Tap to Start CarSpeak Session"
@@ -115,7 +115,7 @@ public final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationScene
             if manager.audioEngine.isPlayingOutput {
                 manager.audioEngine.interruptPlaybackImmediately()
             } else if manager.isLiveSessionActive {
-                manager.audioEngine.speechTranscriber.forceSubmitCurrentTranscript()
+                manager.stopHandsFreeSession()
             } else {
                 manager.startHandsFreeSession()
             }

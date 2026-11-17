@@ -45,8 +45,32 @@ jobs:
           TARGET_BUNDLE="${{ github.event.inputs.bundle_id || 'com.AlexMohit.CarSpeak' }}"
           echo "Setting CURRENT_PROJECT_VERSION to $BUILD_NUM and PRODUCT_BUNDLE_IDENTIFIER to $TARGET_BUNDLE"
           sed -i '' "s/CURRENT_PROJECT_VERSION: .*/CURRENT_PROJECT_VERSION: \"$BUILD_NUM\"/" project.yml
-          sed -i '' "s/PRODUCT_BUNDLE_IDENTIFIER: .*/PRODUCT_BUNDLE_IDENTIFIER: $TARGET_BUNDLE/" project.yml
+          sed -i '' "s/PRODUCT_BUNDLE_IDENTIFIER: com.AlexMohit.CarSpeak$/PRODUCT_BUNDLE_IDENTIFIER: $TARGET_BUNDLE/" project.yml
           xcodegen generate
+
+      - name: 🧪 Run iOS Runtime Simulator Tests & Launch Verification
+        run: |
+          SIM_ID=$(xcrun simctl list devices available -j | python3 -c "import sys,json; devs=[d for r in json.load(sys.stdin)['devices'].values() for d in r if 'iPhone' in d['name'] and d['isAvailable']]; print(devs[-1]['udid'])")
+          echo "Using iOS Simulator UDID: $SIM_ID"
+          xcrun simctl boot "$SIM_ID" || true
+          xcrun simctl bootstatus "$SIM_ID" -b
+
+          xcodebuild test \
+            -project CarSpeak.xcodeproj \
+            -scheme CarSpeak \
+            -destination "platform=iOS Simulator,id=$SIM_ID" \
+            CODE_SIGNING_ALLOWED=NO
+
+          # Launch the app directly in the booted Simulator and verify it stays alive without crashing
+          APP_PATH=$(find ~/Library/Developer/Xcode/DerivedData -name "CarSpeak.app" -path "*Debug-iphonesimulator*" | head -n 1)
+          echo "Installing Simulator app from: $APP_PATH"
+          xcrun simctl install "$SIM_ID" "$APP_PATH"
+          LAUNCH_OUT=$(xcrun simctl launch "$SIM_ID" com.AlexMohit.CarSpeak)
+          echo "Launched: $LAUNCH_OUT"
+          PID=$(echo "$LAUNCH_OUT" | awk '{print $2}')
+          sleep 4
+          xcrun simctl spawn "$SIM_ID" launchctl list | grep -i "CarSpeak" || true
+          ps -p "$PID" -o pid,comm
 
       - name: 🔑 Configure App Store Connect API Credentials
         env:
