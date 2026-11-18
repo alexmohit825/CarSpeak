@@ -1,6 +1,7 @@
 import Foundation
 import CarPlay
 import UIKit
+import Combine
 
 /// CarPlay Dashboard Scene Delegate for CarSpeak.
 /// Acts as a clean, glanceable mirror display for Dr. Mohit's Antigravity portfolio,
@@ -12,6 +13,7 @@ public final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationScene
     private var threadsTabTemplate: CPListTemplate?
     private var lastSectionRefreshTime: Date = .distantPast
     private var pendingRefreshWorkItem: DispatchWorkItem?
+    private var cancellables = Set<AnyCancellable>()
 
     public func templateApplicationScene(
         _ templateApplicationScene: CPTemplateApplicationScene,
@@ -19,6 +21,7 @@ public final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationScene
     ) {
         self.interfaceController = interfaceController
         SteeringWheelController.shared.configureRemoteCommands()
+        bindStateObservers()
 
         let copilotTab = buildCopilotTabTemplate()
         let projectsTab = buildProjectsTabTemplate()
@@ -30,16 +33,15 @@ public final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationScene
 
         let tabBar = CPTabBarTemplate(templates: [copilotTab, projectsTab, threadsTab])
         interfaceController.setRootTemplate(tabBar, animated: false, completion: nil)
+    }
 
-        // Only start session if not already running on iPhone
+    public func sceneDidBecomeActive(_ scene: UIScene) {
+        SteeringWheelController.shared.configureRemoteCommands()
         let manager = GeminiLiveSessionManager.shared
-        if !manager.isLiveSessionActive {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                if !manager.isLiveSessionActive {
-                    manager.startHandsFreeSession()
-                }
-            }
+        if !manager.isLiveSessionActive || !manager.audioEngine.isCapturing {
+            manager.startHandsFreeSession(forceRestartAudio: true)
         }
+        refreshCopilotSections()
     }
 
     public func sceneWillEnterForeground(_ scene: UIScene) {
@@ -51,7 +53,33 @@ public final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationScene
         _ templateApplicationScene: CPTemplateApplicationScene,
         didDisconnectInterfaceController interfaceController: CPInterfaceController
     ) {
+        cancellables.removeAll()
         self.interfaceController = nil
+    }
+
+    private func bindStateObservers() {
+        cancellables.removeAll()
+        let manager = GeminiLiveSessionManager.shared
+
+        manager.$isLiveSessionActive
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.refreshCopilotSections() }
+            .store(in: &cancellables)
+
+        manager.$liveModelTranscript
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.refreshCopilotSections() }
+            .store(in: &cancellables)
+
+        manager.audioEngine.$isPlayingOutput
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.refreshCopilotSections() }
+            .store(in: &cancellables)
+
+        manager.audioEngine.$isCapturing
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.refreshCopilotSections() }
+            .store(in: &cancellables)
     }
 
     // MARK: - Tab 1: Live Copilot & Glanceable Status
@@ -95,7 +123,7 @@ public final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationScene
             statusTitle = "Speaking"
             subtitleText = "Tap to interrupt"
             statusImageName = "speaker.wave.3.fill"
-        } else if manager.isLiveSessionActive {
+        } else if manager.isLiveSessionActive && manager.audioEngine.isCapturing {
             statusTitle = "Listening"
             subtitleText = "Say 'End session' or tap to stop"
             statusImageName = "waveform"
@@ -113,10 +141,10 @@ public final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationScene
         liveVoiceItem.handler = { _, completion in
             if manager.audioEngine.isPlayingOutput {
                 manager.audioEngine.interruptPlaybackImmediately()
-            } else if manager.isLiveSessionActive {
+            } else if manager.isLiveSessionActive && manager.audioEngine.isCapturing {
                 manager.stopHandsFreeSession()
             } else {
-                manager.startHandsFreeSession()
+                manager.startHandsFreeSession(forceRestartAudio: true)
             }
             completion()
         }

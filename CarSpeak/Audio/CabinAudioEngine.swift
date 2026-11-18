@@ -70,6 +70,7 @@ final class CabinAudioEngine: NSObject, ObservableObject, AVSpeechSynthesizerDel
     }
 
     private func ensurePlayerNodeConnected() {
+        playerNode.volume = 0.45
         if !audioEngine.attachedNodes.contains(playerNode) {
             audioEngine.attach(playerNode)
             audioEngine.connect(playerNode, to: audioEngine.mainMixerNode, format: playbackFormat)
@@ -441,6 +442,7 @@ final class CabinAudioEngine: NSObject, ObservableObject, AVSpeechSynthesizerDel
         }
         utterance.rate = 0.52
         utterance.pitchMultiplier = 1.0
+        utterance.volume = 0.55
 
         DispatchQueue.main.async {
             self.isPlayingOutput = true
