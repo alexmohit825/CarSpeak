@@ -460,6 +460,16 @@ final class GeminiLiveSessionManager: NSObject, ObservableObject {
             if let inputTrans = serverContent["inputTranscription"] as? [String: Any],
                let userText = inputTrans["text"] as? String, !userText.isEmpty {
                 pendingUserTranscriptBuffer += userText
+                let normalizedSpeech = pendingUserTranscriptBuffer.lowercased()
+                let stopPhrases = ["end session", "stop session", "stop listening", "disconnect", "goodbye"]
+                if stopPhrases.contains(where: { normalizedSpeech.contains($0) }) {
+                    DispatchQueue.main.async {
+                        AcousticEarcons.shared.play(.micMuted)
+                        self.stopHandsFreeSession()
+                        self.connectionStatusText = "Session Ended"
+                    }
+                    return
+                }
                 DispatchQueue.main.async {
                     self.liveUserTranscript = self.pendingUserTranscriptBuffer
                 }
@@ -530,6 +540,15 @@ final class GeminiLiveSessionManager: NSObject, ObservableObject {
             let callId = fc["id"] as? String ?? ""
             let name = fc["name"] as? String ?? ""
             let args = fc["args"] as? [String: Any] ?? [:]
+
+            if name == "end_carspeak_session" {
+                await MainActor.run {
+                    AcousticEarcons.shared.play(.micMuted)
+                    self.stopHandsFreeSession()
+                    self.connectionStatusText = "Session Ended"
+                }
+                return
+            }
 
             guard let url = URL(string: "\(vault.baseURL)/api/tool-call") else { continue }
             var req = URLRequest(url: url)

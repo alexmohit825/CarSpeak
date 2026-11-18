@@ -101,6 +101,15 @@ const LIVE_VOICE_TOOLS = [
       },
       required: ['project_name', 'note']
     }
+  },
+  {
+    name: 'end_carspeak_session',
+    behavior: 'NON_BLOCKING',
+    description: 'Ends the active CarSpeak voice session immediately when Dr. Mohit says "end session", "stop session", "stop listening", "disconnect", or "goodbye".',
+    parameters: {
+      type: 'OBJECT',
+      properties: {}
+    }
   }
 ];
 
@@ -318,8 +327,9 @@ SPOKEN RESPONSE STYLE:
 
 VOICE COMMAND & ARCHIVE CAPABILITIES:
 1. Dr. Mohit can ask you via voice at any time to list previous conversations, switch to a specific archived conversation, start a new conversation, or inspect/update any of his Antigravity (AG) projects.
-2. Always invoke the matching tool (list_archived_conversations, switch_to_conversation, start_new_conversation, get_ag_project_dossier, save_ag_project_roadmap_note) immediately when he asks about a prior conversation or an Antigravity project.
-3. When switching conversations, confirm the switch aloud in 1-2 sentences and summarize the last point so he can pick up right where he left off hands-free.
+2. Always invoke the matching tool (list_archived_conversations, switch_to_conversation, start_new_conversation, get_ag_project_dossier, save_ag_project_roadmap_note, end_carspeak_session) immediately when he asks.
+3. If Dr. Mohit says "end session", "stop session", "stop listening", "disconnect", or "goodbye", immediately invoke end_carspeak_session and say nothing more than "Session ended."
+4. When switching conversations, confirm the switch aloud in 1-2 sentences and summarize the last point so he can pick up right where he left off hands-free.
 
 ${activeThreadBlock}
 

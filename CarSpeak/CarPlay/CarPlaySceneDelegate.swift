@@ -97,7 +97,7 @@ public final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationScene
             statusImageName = "speaker.wave.3.fill"
         } else if manager.isLiveSessionActive {
             statusTitle = "Listening"
-            subtitleText = "Speak naturally • Tap to pause"
+            subtitleText = "Say 'End session' or tap to stop"
             statusImageName = "waveform"
         } else {
             statusTitle = "Start CarSpeak"
