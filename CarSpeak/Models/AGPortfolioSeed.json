@@ -887,5 +887,122 @@
     ],
     "recentFocus": "Structured sign-out and ICU neuro-check tracking.",
     "roadmapNotes": []
+  },
+  {
+    "id": "agmobile",
+    "displayName": "AGMobile",
+    "category": "Infrastructure & Agents",
+    "techStack": "Python, Windows Daemon, Cloudflare Worker",
+    "bundleId": "N/A (Mobile Bridge)",
+    "summary": "Mobile Antigravity bridge daemon and worker connecting mobile devices to local AG agent workflows.",
+    "recentFocus": "Daemon automation and worker endpoint integration."
+  },
+  {
+    "id": "kangle",
+    "displayName": "Kangle",
+    "category": "Medical & Spine AI",
+    "techStack": "Swift, SwiftUI, iOS 17+, XcodeGen",
+    "bundleId": "com.alexmohit.kangle",
+    "summary": "iOS spinal/orthopedic angle measurement and clinical geometry application with Ad-Hoc OTA delivery.",
+    "recentFocus": "Native iOS measurement pipeline and Ad-Hoc OTA builds."
+  },
+  {
+    "id": "mindsprint",
+    "displayName": "MindSprint",
+    "category": "Consumer & Productivity",
+    "techStack": "React, Vite, Cloudflare Pages/Workers",
+    "bundleId": "com.AlexMohit.MindSprint",
+    "summary": "Executive book synthesis and visual mental models platform for high-density cognitive intelligence.",
+    "recentFocus": "Book summary synthesis and App Store/OTA delivery."
+  },
+  {
+    "id": "necessity-iq",
+    "displayName": "Necessity-IQ",
+    "category": "Medicolegal & Practice",
+    "techStack": "Next.js 14, TypeScript, OpenAI",
+    "bundleId": "N/A (Web App)",
+    "summary": "AI-powered medical necessity letter generator tailored for surgical and clinical insurance pre-authorization.",
+    "recentFocus": "Insurance-ready medical necessity letter generation."
+  },
+  {
+    "id": "notebeam",
+    "displayName": "NoteBeam",
+    "category": "Productivity & Utilities",
+    "techStack": "Cloudflare Worker, Apple Shortcuts, Web Client",
+    "bundleId": "N/A (Shortcut + Worker)",
+    "summary": "1-Click Word document and clipboard to iPhone Apple Notes wireless bridge.",
+    "recentFocus": "Instant PC-to-iPhone Apple Notes transfer."
+  },
+  {
+    "id": "oasisscout",
+    "displayName": "OasisScout",
+    "category": "Real Estate & Geospatial",
+    "techStack": "React, Vite, Cloudflare Workers",
+    "bundleId": "N/A (Web App)",
+    "summary": "Microclimate real estate and 3D topographic intelligence engine for Coachella Valley and nationwide properties.",
+    "recentFocus": "Microclimate modeling and 3D topographic real estate scoring."
+  },
+  {
+    "id": "offerlens",
+    "displayName": "OfferLens",
+    "category": "Finance & Real Estate",
+    "techStack": "React, TypeScript, Vite, Cloudflare",
+    "bundleId": "N/A (Web App)",
+    "summary": "Real estate and financial offer analysis and comparison web application.",
+    "recentFocus": "Offer breakdown and decision scoring."
+  },
+  {
+    "id": "screenbridge",
+    "displayName": "ScreenBridge",
+    "category": "Infrastructure & Utilities",
+    "techStack": ".NET C#, WebRTC/Web Client",
+    "bundleId": "N/A (Desktop + Web)",
+    "summary": "Remote desktop screen sharing and remote assistance bridge between HostClient, HelperClient, and ScreenBridgeWeb.",
+    "recentFocus": "Cross-device remote screen assistance."
+  },
+  {
+    "id": "spotpilot",
+    "displayName": "SpotPilot",
+    "category": "Consumer & Geospatial",
+    "techStack": "React, TypeScript, Vite, Cloudflare Functions",
+    "bundleId": "N/A (Web App)",
+    "summary": "Location and spot intelligence web application backed by Cloudflare Pages Functions.",
+    "recentFocus": "Interactive location discovery and edge functions."
+  },
+  {
+    "id": "surgicalatlas",
+    "displayName": "SurgicalAtlas",
+    "category": "Neurosurgical & Spine",
+    "techStack": "Python, Canonical Anatomical Plates",
+    "bundleId": "N/A (Asset Collection)",
+    "summary": "Resident Master Collection of modernized neurosurgical and spine anatomical plates with 100% landmark preservation.",
+    "recentFocus": "Canonical reference grounding and clean surgical plate staging."
+  },
+  {
+    "id": "surgicalcanvas",
+    "displayName": "SurgicalCanvas",
+    "category": "Neurosurgical & Spine",
+    "techStack": "React, TypeScript, Vite, Cloudflare Functions",
+    "bundleId": "N/A (Web App)",
+    "summary": "Interactive neurosurgical visual canvas and diagramming web platform.",
+    "recentFocus": "Interactive surgical canvas and Cloudflare edge functions."
+  },
+  {
+    "id": "terrainexplorer",
+    "displayName": "TerrainExplorer",
+    "category": "Geospatial & AR",
+    "techStack": "Swift/iOS, AR, Geospatial Intelligence",
+    "bundleId": "com.AlexMohit.TerrainExplorer",
+    "summary": "Augmented reality and geospatial landscape intelligence engine ('Radiologist for the Earth') identifying visible natural terrain.",
+    "recentFocus": "AR terrain recognition and iOS Ad-Hoc OTA delivery."
+  },
+  {
+    "id": "xrayscout",
+    "displayName": "XRayScout",
+    "category": "Medical & Radiology AI",
+    "techStack": "React, TypeScript, Vite, Cloudflare Functions",
+    "bundleId": "N/A (Web App)",
+    "summary": "Radiographic and X-ray analysis companion web application.",
+    "recentFocus": "Radiology review UI and edge inference."
   }
 ]

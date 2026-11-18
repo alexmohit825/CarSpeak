@@ -106,9 +106,9 @@ const LIVE_VOICE_TOOLS = [
 
 async function getProjects(env) {
   if (!env.CARSPEAK_KV) return AG_PORTFOLIO_SEED;
-  const raw = await env.CARSPEAK_KV.get('ag_projects_v1');
+  const raw = await env.CARSPEAK_KV.get('ag_projects_v2');
   if (!raw) {
-    await env.CARSPEAK_KV.put('ag_projects_v1', JSON.stringify(AG_PORTFOLIO_SEED));
+    await env.CARSPEAK_KV.put('ag_projects_v2', JSON.stringify(AG_PORTFOLIO_SEED));
     return AG_PORTFOLIO_SEED;
   }
   try {
@@ -262,7 +262,7 @@ async function executeVoiceTool(env, name, args = {}) {
       proj.roadmapNotes = proj.roadmapNotes || [];
       proj.roadmapNotes.unshift(noteEntry);
       if (env.CARSPEAK_KV) {
-        await env.CARSPEAK_KV.put('ag_projects_v1', JSON.stringify(projects));
+        await env.CARSPEAK_KV.put('ag_projects_v2', JSON.stringify(projects));
       }
       return {
         status: 'saved',
@@ -283,7 +283,6 @@ async function executeVoiceTool(env, name, args = {}) {
 function buildSystemInstruction(personaKey, projects, activeConv, conversations) {
   const basePersona = PERSONA_PROMPTS[personaKey] || PERSONA_PROMPTS.executive;
   const portfolioDigest = projects
-    .slice(0, 48)
     .map(p => `• ${p.displayName} [${p.category}]: ${p.summary} (Focus: ${p.recentFocus})`)
     .join('\n');
 
@@ -307,12 +306,15 @@ ${recentTurns || '(New thread — no prior turns yet)'}
 `;
   }
 
-  return `${basePersona}
+  return `STRICT LANGUAGE LOCK & CABIN NOISE RULE (MANDATORY):
+1. You MUST ALWAYS understand and speak EXCLUSIVELY in American English. NEVER switch to Spanish or any other language under any circumstances, even if road noise, car radio, or unclear audio sounds non-English.
+2. If you hear only silence, road/engine noise, or unintelligible ambient sound, STAY COMPLETELY SILENT and wait. Do NOT speak unprompted or invent a reply when Dr. Mohit has not asked a clear question in English.
 
-TURN-TAKING PROTOCOL:
-1. Dr. Mohit will speak freely and will say 'over' (or pause) when he concludes his turn.
-2. Deliver a clear, authoritative, intelligent response (2 to 4 crisp sentences unless he asks for deep architectural detail).
-3. Do NOT say 'over' in your own response, and never use markdown symbols (*, #, -) that distract from clean spoken neural audio.
+${basePersona}
+
+SPOKEN RESPONSE STYLE:
+1. Deliver a clear, authoritative, intelligent spoken answer (2 to 4 crisp sentences unless Dr. Mohit asks for deep architectural detail).
+2. Never use markdown symbols (*, #, -) that distract from clean spoken neural audio.
 
 VOICE COMMAND & ARCHIVE CAPABILITIES:
 1. Dr. Mohit can ask you via voice at any time to list previous conversations, switch to a specific archived conversation, start a new conversation, or inspect/update any of his Antigravity (AG) projects.
@@ -529,7 +531,7 @@ export default {
       if (url.pathname === '/api/projects/sync' && request.method === 'POST') {
         const body = await request.json();
         if (Array.isArray(body.projects) && env.CARSPEAK_KV) {
-          await env.CARSPEAK_KV.put('ag_projects_v1', JSON.stringify(body.projects));
+          await env.CARSPEAK_KV.put('ag_projects_v2', JSON.stringify(body.projects));
           return Response.json({ status: 'synced', count: body.projects.length }, { headers: CORS_HEADERS });
         }
         return Response.json({ error: 'Invalid projects payload' }, { status: 400, headers: CORS_HEADERS });

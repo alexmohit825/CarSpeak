@@ -84,25 +84,24 @@ public final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationScene
     private func buildCopilotSections() -> [CPListSection] {
         let manager = GeminiLiveSessionManager.shared
         let vault = ConversationVaultClient.shared
+        let projectCount = max(vault.agProjects.count, 69)
 
-        // 1. Primary Status & Action Row (Zero Clutter)
+        // 1. Primary Voice Status Row (Clean, Minimalist, Zero Clutter)
         let statusTitle: String
         let subtitleText: String
         let statusImageName: String
 
         if manager.audioEngine.isPlayingOutput {
-            statusTitle = "🔊 AI Speaking • Tap to Interrupt"
-            subtitleText = !manager.liveModelTranscript.isEmpty
-                ? String(manager.liveModelTranscript.prefix(90))
-                : "Speaking through vehicle audio..."
+            statusTitle = "Speaking"
+            subtitleText = "Tap to interrupt"
             statusImageName = "speaker.wave.3.fill"
         } else if manager.isLiveSessionActive {
-            statusTitle = "🎙️ Live • Speak Naturally"
-            subtitleText = "In: \(manager.audioEngine.activeInputRoute) • Sent: \(manager.sentAudioFramesCount) frames • Err: \(manager.audioEngine.lastAudioError)"
-            statusImageName = "waveform.circle.fill"
+            statusTitle = "Listening"
+            subtitleText = "Speak naturally • Tap to pause"
+            statusImageName = "waveform"
         } else {
-            statusTitle = "▶️ Tap to Start CarSpeak Session"
-            subtitleText = "Continuous hands-free neural partner for all 56 Antigravity projects"
+            statusTitle = "Start CarSpeak"
+            subtitleText = "All \(projectCount) Antigravity projects ready"
             statusImageName = "play.circle.fill"
         }
 
@@ -122,16 +121,12 @@ public final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationScene
             completion()
         }
 
-        // 2. Active Antigravity Project Glance
-        let activeProjectTitle = vault.activeConversation?.projectName ?? "Antigravity Portfolio"
-        let activeThreadSummary = vault.activeConversation?.summary.isEmpty == false
-            ? String(vault.activeConversation!.summary.prefix(90))
-            : "56 projects active • Neurosurgical, Medicolegal & Finance"
-
+        // 2. Active Project Context
+        let activeProjectTitle = vault.activeConversation?.projectName ?? "All Antigravity Projects"
         let projectItem = CPListItem(
-            text: "📁 Active Context: \(activeProjectTitle)",
-            detailText: activeThreadSummary,
-            image: UIImage(systemName: "folder.badge.gearshape.fill")
+            text: activeProjectTitle,
+            detailText: "Active project context",
+            image: UIImage(systemName: "folder.fill")
         )
         projectItem.handler = { _, completion in
             Task { @MainActor in
@@ -140,15 +135,15 @@ public final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationScene
             }
         }
 
-        // 3. Live Spoken Transcript Glance
+        // 3. Latest Spoken Reply
         let transcriptDetail = !manager.liveModelTranscript.isEmpty
             ? manager.liveModelTranscript
-            : (!manager.liveUserTranscript.isEmpty ? "Hearing: \"\(manager.liveUserTranscript)\"" : "Standing by for your first question.")
+            : (!manager.liveUserTranscript.isEmpty ? "Heard: \"\(manager.liveUserTranscript)\"" : "Ready when you are.")
 
         let transcriptItem = CPListItem(
-            text: "💬 Live Transcript",
-            detailText: String(transcriptDetail.prefix(100)),
-            image: UIImage(systemName: "bubble.left.and.bubble.right.fill")
+            text: "Latest Response",
+            detailText: String(transcriptDetail.prefix(90)),
+            image: UIImage(systemName: "text.bubble.fill")
         )
         transcriptItem.handler = { _, completion in
             completion()
@@ -156,56 +151,11 @@ public final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationScene
 
         let mainSection = CPListSection(
             items: [liveVoiceItem, projectItem, transcriptItem],
-            header: "CarSpeak • Continuous In-Car Partner",
+            header: nil,
             sectionIndexTitle: nil
         )
 
-        // 4. 1-Tap Quick Spoken Consultations
-        let quickPrompts: [(title: String, detail: String, query: String)] = [
-            (
-                "📊 Portfolio Executive Briefing",
-                "Spoken overview across active Antigravity projects",
-                "Give me a crisp two-sentence executive briefing on my active Antigravity projects and ask which one I want to dive into."
-            ),
-            (
-                "🦴 Spine-Measure & PJKPredict",
-                "Status of spinal deformity & alignment tools",
-                "Summarize the current architecture and next milestones for Spine-Measure and PJKPredict in two spoken sentences."
-            ),
-            (
-                "🏥 VigilOR & NeuroCall",
-                "Neurosurgical call & OR intelligence roadmap",
-                "Summarize the status of VigilOR and NeuroCall in two spoken sentences."
-            ),
-            (
-                "⚖️ MDEsq & CPTArmor",
-                "Medicolegal & coding intelligence status",
-                "Summarize the status of MDEsq and CPTArmor in two spoken sentences."
-            )
-        ]
-
-        let quickItems: [CPListItem] = quickPrompts.map { prompt in
-            let item = CPListItem(
-                text: prompt.title,
-                detailText: prompt.detail,
-                image: UIImage(systemName: "bolt.circle.fill")
-            )
-            item.handler = { _, completion in
-                Task { @MainActor in
-                    await manager.sendVoiceOrTextCommand(prompt.query)
-                    completion()
-                }
-            }
-            return item
-        }
-
-        let quickSection = CPListSection(
-            items: quickItems,
-            header: "1-Tap Hands-Free Consultations",
-            sectionIndexTitle: nil
-        )
-
-        return [mainSection, quickSection]
+        return [mainSection]
     }
 
     // MARK: - Tab 2: 56 Antigravity Projects
