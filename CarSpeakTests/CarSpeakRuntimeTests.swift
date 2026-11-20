@@ -5,7 +5,9 @@ import AVFoundation
 final class CarSpeakRuntimeTests: XCTestCase {
 
     func testCabinAudioEngineFormatAndPlaybackInSimulator() throws {
+        UserDefaults.standard.removeObject(forKey: "carspeak_output_gain")
         let engine = CabinAudioEngine()
+        XCTAssertLessThanOrEqual(engine.outputGain, 0.30, "Default output gain must be attenuated for CarPlay voice channel")
         XCTAssertEqual(engine.playbackFormat.sampleRate, 24000)
         XCTAssertEqual(engine.playbackFormat.channelCount, 1)
         XCTAssertEqual(engine.playbackFormat.commonFormat, .pcmFormatFloat32)

@@ -259,6 +259,19 @@ struct CockpitView: View {
                 }
             }
 
+            HStack(spacing: 10) {
+                Image(systemName: "speaker.wave.1.fill")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Slider(value: $audio.outputGain, in: 0.05...0.80, step: 0.05)
+                    .tint(Color(red: 0.31, green: 0.27, blue: 0.90))
+                Text("\(Int(audio.outputGain * 100))%")
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .frame(width: 36, alignment: .trailing)
+            }
+            .padding(.horizontal, 12)
+
             HStack(spacing: 8) {
                 Circle()
                     .fill(session.isLiveSessionActive ? Color(red: 0.06, green: 0.73, blue: 0.51) : Color.gray)

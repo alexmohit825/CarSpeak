@@ -21,6 +21,11 @@ final class CabinAudioEngine: NSObject, ObservableObject, AVSpeechSynthesizerDel
     @Published var isMuted: Bool = false
     @Published var inputLevel: Float = 0.0
     @Published var isPlayingOutput: Bool = false
+    @Published var outputGain: Float = UserDefaults.standard.object(forKey: "carspeak_output_gain") as? Float ?? 0.22 {
+        didSet {
+            UserDefaults.standard.set(outputGain, forKey: "carspeak_output_gain")
+        }
+    }
 
     // Black-Box Telemetry
     @Published var activeInputRoute: String = "Unknown"
@@ -70,7 +75,8 @@ final class CabinAudioEngine: NSObject, ObservableObject, AVSpeechSynthesizerDel
     }
 
     private func ensurePlayerNodeConnected() {
-        playerNode.volume = 0.45
+        playerNode.volume = 0.6
+        audioEngine.mainMixerNode.outputVolume = 0.6
         if !audioEngine.attachedNodes.contains(playerNode) {
             audioEngine.attach(playerNode)
             audioEngine.connect(playerNode, to: audioEngine.mainMixerNode, format: playbackFormat)
@@ -399,10 +405,11 @@ final class CabinAudioEngine: NSObject, ObservableObject, AVSpeechSynthesizerDel
                   let floatChannel = buffer.floatChannelData?[0] else { return }
             buffer.frameLength = frameCount
 
+            let gain = max(0.05, min(1.0, self.outputGain))
             data.withUnsafeBytes { rawBufferPointer in
                 guard let int16Ptr = rawBufferPointer.bindMemory(to: Int16.self).baseAddress else { return }
                 for i in 0..<Int(frameCount) {
-                    floatChannel[i] = Float(int16Ptr[i]) / 32768.0
+                    floatChannel[i] = (Float(int16Ptr[i]) / 32768.0) * gain
                 }
             }
 
@@ -442,7 +449,7 @@ final class CabinAudioEngine: NSObject, ObservableObject, AVSpeechSynthesizerDel
         }
         utterance.rate = 0.52
         utterance.pitchMultiplier = 1.0
-        utterance.volume = 0.55
+        utterance.volume = min(1.0, max(0.1, outputGain * 1.5))
 
         DispatchQueue.main.async {
             self.isPlayingOutput = true
